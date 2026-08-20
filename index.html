@@ -1,0 +1,2332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Board</title>
+<style>
+  :root{
+    --bg:#1b1d22;
+    --panel:#25282e;
+    --panel-2:#2e323a;
+    --line:#3a3f47;
+    --text:#e7e9ec;
+    --text-dim:#9aa0aa;
+    --accent:#ff7a45;
+    --accent-2:#5bc0be;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg);color:var(--text);user-select:none;}
+
+  #viewport{position:fixed;inset:0;overflow:hidden;cursor:default;
+    background-image:radial-gradient(circle,#2a2d33 1px, transparent 1px);
+    background-size:28px 28px;}
+  #viewport.panning{cursor:grabbing;}
+  #viewport.tool-draw{cursor:crosshair;}
+  #viewport.tool-line{cursor:crosshair;}
+  #viewport.tool-text{cursor:text;}
+
+  #world{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform;}
+
+  #elements{position:absolute;left:0;top:0;}
+
+  .obj{position:absolute;will-change:transform,left,top,width,height;}
+  .obj{backface-visibility:hidden;transform:translateZ(0);} 
+  .obj.selected > .frame{outline:2px solid var(--accent);}
+  .obj .frame{position:absolute;inset:0;pointer-events:none;}
+
+  .img-obj img{display:block;width:100%;height:100%;object-fit:fill;pointer-events:none;border-radius:2px;}
+  .img-obj{cursor:move;}
+  .img-obj.selected{outline:2px solid var(--accent);}
+
+  .text-wrap{cursor:move;}
+  .text-wrap.selected{outline:2px solid var(--accent);}
+  .text-obj{min-width:20px;min-height:1.2em;padding:2px 4px;line-height:1.25;outline:none;white-space:pre;word-break:normal;}
+  .text-obj.editing{cursor:text;}
+
+  .vec-obj{pointer-events:auto;}
+  .vec-obj svg{position:absolute;left:0;top:0;overflow:visible;}
+  .vec-obj.selected{outline:1px dashed var(--accent-2);outline-offset:4px;}
+
+  /* locked objects: still selectable (so they can be unlocked again) but visually distinct
+     and not draggable/resizable — dashed dim outline instead of the normal accent outline */
+  .obj.locked{cursor:default !important;}
+  .obj.locked.selected > .frame{outline:2px dashed var(--text-dim) !important;}
+  .img-obj.locked.selected, .text-wrap.locked.selected{outline:2px dashed var(--text-dim) !important;}
+  .vec-obj.locked.selected{outline:1px dashed var(--text-dim) !important;}
+
+  /* when in draw/text/line mode, let the viewport receive pointer events so drawing/adding text works on top */
+  #viewport.tool-draw .obj, #viewport.tool-text .obj, #viewport.tool-line .obj { cursor: inherit !important; pointer-events: none; }
+  /* retain pointer-events for UI handles when needed (they live outside .obj) */
+
+  .handle{position:absolute;width:10px;height:10px;background:#fff;border:2px solid var(--accent);
+    border-radius:2px;pointer-events:auto;z-index:5;}
+  .handle.nw{left:-6px;top:-6px;cursor:nwse-resize;}
+  .handle.ne{right:-6px;top:-6px;cursor:nesw-resize;}
+  .handle.sw{left:-6px;bottom:-6px;cursor:nesw-resize;}
+  .handle.se{right:-6px;bottom:-6px;cursor:nwse-resize;}
+  .handle.rot{left:50%;top:-28px;margin-left:-6px;border-radius:50%;cursor:grab;background:var(--accent-2);border-color:#fff;}
+  .rot-stem{position:absolute;left:50%;top:-20px;width:1px;height:20px;background:var(--accent-2);pointer-events:none;}
+
+  .line-handle{position:absolute;width:10px;height:10px;background:#fff;border:2px solid var(--accent-2);
+    border-radius:50%;pointer-events:auto;transform:translate(-50%,-50%);z-index:6;}
+
+  /* ---------- toolbar ---------- */
+  #toolbar{position:fixed;top:12px;left:12px;z-index:20;background:var(--panel);border:1px solid var(--line);
+    border-radius:10px;padding:6px;display:flex;gap:4px;box-shadow:0 4px 18px rgba(0,0,0,.35);align-items:center;flex-wrap:wrap;max-width:640px;}
+  .tbtn{width:36px;height:36px;border-radius:7px;background:transparent;border:1px solid transparent;color:var(--text);
+    display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:16px;}
+  .tbtn:hover{background:var(--panel-2);}
+  .tbtn.active{background:var(--accent);color:#1b1d22;}
+  .tbtn.disabled{opacity:.35;pointer-events:none;}
+  .tsep{width:1px;align-self:stretch;background:var(--line);margin:4px 2px;}
+
+  #subbar{position:fixed;top:58px;left:12px;z-index:20;background:var(--panel);border:1px solid var(--line);
+    border-radius:10px;padding:8px 10px;display:none;gap:10px;align-items:center;box-shadow:0 4px 18px rgba(0,0,0,.35);
+    font-size:12px;color:var(--text-dim);flex-wrap:wrap;max-width:420px;}
+  #subbar.show{display:flex;}
+  #subbar label{display:flex;align-items:center;gap:5px;}
+  #subbar input[type=color]{width:26px;height:26px;border:none;background:none;padding:0;cursor:pointer;}
+  #subbar input[type=range]{width:80px;}
+  #subbar input[type=number]{width:50px;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+    border-radius:4px;padding:3px 4px;}
+  #subbar button{background:var(--panel-2);border:1px solid var(--line);color:var(--text);border-radius:5px;
+    padding:5px 8px;cursor:pointer;font-size:12px;}
+  #subbar button:hover{background:#383c45;}
+  #subbar button.active{background:var(--accent);color:#1b1d22;border-color:var(--accent);}
+  .text-obj:empty:before{content:attr(data-placeholder);color:var(--text-dim);pointer-events:none}
+
+  #rightbar{position:fixed;top:12px;right:12px;z-index:20;display:flex;gap:6px;}
+  #rightbar button{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:8px;
+    padding:9px 12px;cursor:pointer;font-size:13px;box-shadow:0 4px 18px rgba(0,0,0,.35);}
+  #rightbar button:hover{background:var(--panel-2);}
+  #rightbar button.primary{background:var(--accent);color:#1b1d22;border-color:var(--accent);font-weight:600;}
+  #rightbar button.primary:hover{filter:brightness(1.08);}
+
+  #zoomIndicator{position:fixed;bottom:12px;left:12px;z-index:20;background:var(--panel);border:1px solid var(--line);
+    border-radius:8px;padding:6px 10px;font-size:12px;color:var(--text-dim);}
+
+  #hint{position:fixed;bottom:12px;right:12px;z-index:20;background:var(--panel);border:1px solid var(--line);
+    border-radius:8px;padding:6px 10px;font-size:11px;color:var(--text-dim);max-width:340px;line-height:1.5;}
+
+  #fileInput,#projectInput{display:none;}
+
+  .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50;display:none;align-items:center;justify-content:center;}
+  .modal-bg.show{display:flex;}
+  .modal{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px;width:360px;color:var(--text);}
+  .modal h3{margin:0 0 10px;font-size:15px;}
+  .modal p{font-size:12.5px;color:var(--text-dim);line-height:1.5;margin:0 0 14px;}
+  .modal .row{display:flex;gap:8px;margin-top:14px;}
+  .modal button{flex:1;padding:9px;border-radius:7px;border:1px solid var(--line);background:var(--panel-2);color:var(--text);cursor:pointer;}
+  .modal button.primary{background:var(--accent);color:#1b1d22;border-color:var(--accent);font-weight:600;}
+  .modal label{display:flex;align-items:center;gap:8px;font-size:12.5px;margin-bottom:8px;}
+  .group-overlay{position:absolute;border:2px dashed rgba(91,192,190,0.9);pointer-events:none;}
+  /* (removed) deselect overlay — using a non-blocking mouseup handler instead */
+  .group-overlay .g-handle{position:absolute;width:12px;height:12px;background:#fff;border:2px solid var(--accent-2);border-radius:3px;pointer-events:auto;}
+  .group-overlay .g-rot{position:absolute;left:50%;top:-28px;margin-left:-8px;width:14px;height:14px;border-radius:50%;background:var(--accent-2);border:2px solid #fff;pointer-events:auto;}
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <button class="tbtn active" data-tool="select" title="Select / Move (V)">&#9995;</button>
+  <button class="tbtn" data-tool="text" title="Text (T) — double-click a placed text box to edit it">T</button>
+  <button class="tbtn" data-tool="line" title="Line / Arrow (L)">&#8599;</button>
+  <button class="tbtn" data-tool="draw" title="Draw (D)">&#9998;</button>
+  <div class="tsep"></div>
+  <button class="tbtn" id="btnImport" title="Import Image / GIF">&#128247;</button>
+  <div class="tsep"></div>
+  <button class="tbtn" id="btnSnap" title="Snap to grid">#</button>
+  <div class="tsep"></div>
+  <button class="tbtn" id="btnUndo" title="Undo (Ctrl+Z)">&#8630;</button>
+  <button class="tbtn" id="btnRedo" title="Redo (Ctrl+Shift+Z)">&#8631;</button>
+  <div class="tsep"></div>
+  <button class="tbtn" id="btnToFront" title="Bring to Front">&#10514;</button>
+  <button class="tbtn" id="btnForward" title="Bring Forward">&#9650;</button>
+  <button class="tbtn" id="btnBackward" title="Send Backward">&#9660;</button>
+  <button class="tbtn" id="btnToBack" title="Send to Back">&#10515;</button>
+  <div class="tsep"></div>
+  <button class="tbtn" id="btnToggleLock" title="Lock/Unlock selected">&#128275;</button>
+  <button class="tbtn" id="btnDelete" title="Delete selected (Del)">&#128465;</button>
+</div>
+
+<div id="subbar"></div>
+
+<div id="rightbar">
+  <button id="btnSaveProject" title="Save editable project as .json">Save Project</button>
+  <button id="btnLoadProject" title="Load a .json project">Load</button>
+  <button id="btnExportPNG">Export PNG</button>
+  <button id="btnFit" title="Fit view to content">Fit</button>
+  <button class="primary" id="btnExportPreview">Export Preview HTML</button>
+</div>
+
+<div id="zoomIndicator">100%</div>
+<div id="hint">Middle-click drag or Space+drag to pan &middot; Scroll to zoom &middot; Double-click text to edit it &middot; Ctrl/Cmd+Z undo &middot; Ctrl/Cmd+V paste</div>
+
+<div id="viewport">
+  <div id="world">
+    <div id="elements"></div>
+  </div>
+</div>
+
+<input type="file" id="fileInput" accept="image/*" multiple>
+<input type="file" id="projectInput" accept="application/json">
+
+<div class="modal-bg" id="exportModalBg">
+  <div class="modal">
+    <h3>Export Preview HTML</h3>
+    <p>This creates a standalone HTML file with a read-only version of your board (pan + zoom only) — perfect for embedding in a blog via an &lt;iframe&gt;. Images are already embedded as base64, so the exported file is fully self-contained.</p>
+    <label><input type="checkbox" id="startFit" checked> Fit view to content on load</label>
+    <label>Image quality <input type="range" id="exportQuality" min="0.1" max="1" step="0.01" value="0.85"> <span id="exportQualityVal">85%</span></label>
+    <label>Max image dimension <input type="number" id="exportMaxDim" value="800" min="64" max="4096"> px</label>
+    <div class="row">
+      <button id="exportCancel">Cancel</button>
+      <button id="exportEmbedCopy" title="Copies a ready-to-paste &lt;iframe&gt; tag with the whole preview inlined via srcdoc — no separate file to host">Copy Embed Code</button>
+      <button class="primary" id="exportConfirm">Download File</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+const SVGNS = 'http://www.w3.org/2000/svg';
+
+// ---------------- state ----------------
+let pan = {x:0, y:0};
+let zoom = 1;
+const MIN_ZOOM=0.05, MAX_ZOOM=8;
+let lastPointerClient = {x: window.innerWidth/2, y: window.innerHeight/2};
+// True while any object/handle drag (move, resize, rotate, group transform, line/path drag)
+// is in progress. Used to stop the "click empty canvas to deselect" mouseup check from
+// firing just because the cursor ended up off the object at the end of a drag.
+let dragging = false;
+let tool = 'select';
+let snapEnabled = false;
+let gridSize = 40;
+
+let elements = [];      // images + text  {id,type,x,y,w,h,rot,...}
+let vectors = [];       // lines + paths  {id,type:'line'|'path', ...}
+let zOrder = [];        // stacking order, back-to-front, shared across elements+vectors
+let idCounter = 1;
+function newId(){ return 'el'+(idCounter++); }
+
+let selectedId = null;
+let selectedKind = null; // 'element' | 'vector'
+let selectedIds = []; // for multi-select
+
+let clipboard = { elements: [], vectors: [] };
+
+const viewport = document.getElementById('viewport');
+const world = document.getElementById('world');
+const elLayer = document.getElementById('elements');
+
+
+function applyTransform(){
+  world.style.transform = `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`;
+  document.getElementById('zoomIndicator').textContent = Math.round(zoom*100)+'%';
+  // keep handles visually constant size by inverse-scaling them
+  document.querySelectorAll('.handle, .line-handle, .g-handle, .g-rot').forEach(h=>{ h.style.transform = `scale(${1/zoom})`; h.style.transformOrigin='center center'; });
+}
+
+// --------- batched DOM updates to reduce reflow ---------
+let _dirtySet = new Set(); let _flushScheduled = false;
+function markDirty(id){ _dirtySet.add(id); if(!_flushScheduled){ _flushScheduled = true; requestAnimationFrame(()=>{ _flushScheduled=false; _dirtySet.forEach(i=>{ const el = elements.find(x=>x.id===i); if(el) updateElementDOM(el); const v = vectors.find(x=>x.id===i); if(v) renderVector(v); }); _dirtySet.clear(); }); } }
+
+applyTransform();
+
+function clientToWorld(clientX, clientY){
+  const r = viewport.getBoundingClientRect();
+  return {
+    x: (clientX - r.left - pan.x) / zoom,
+    y: (clientY - r.top - pan.y) / zoom
+  };
+}
+
+// Snaps a world-space coordinate to the grid when grid-snap is active. `invert` flips
+// the effective state for this call — used for the temporary "hold Shift to invert
+// snap" behavior during drags (snap OFF -> Shift snaps; snap ON -> Shift frees it).
+function snap(v, invert){
+  const effective = invert ? !snapEnabled : snapEnabled;
+  return effective ? Math.round(v/gridSize)*gridSize : v;
+}
+
+// small helper: coalesce rapid mousemove events to one per animation frame
+function rafThrottle(fn){
+  let scheduled=false, lastArgs=null;
+  return function(...args){
+    lastArgs = args;
+    if(!scheduled){
+      scheduled = true;
+      requestAnimationFrame(()=>{ scheduled=false; fn.apply(null,lastArgs); });
+    }
+  };
+}
+
+// Snaps an angle (degrees) to the nearest 15° increment (covers 90/45/30/15° etc).
+// Used by every rotate handle while Shift is held.
+function snapAngle(deg){ return Math.round(deg/15)*15; }
+
+// ---------------- toolbar ----------------
+document.querySelectorAll('.tbtn[data-tool]').forEach(btn=>{
+  btn.addEventListener('click', ()=> setTool(btn.dataset.tool));
+});
+function setTool(t){
+  tool = t;
+  document.querySelectorAll('.tbtn[data-tool]').forEach(b=>b.classList.toggle('active', b.dataset.tool===t));
+  viewport.classList.remove('tool-draw','tool-line','tool-text');
+  if(t==='draw') viewport.classList.add('tool-draw');
+  if(t==='line') viewport.classList.add('tool-line');
+  if(t==='text') viewport.classList.add('tool-text');
+  deselect();
+  renderSubbar();
+}
+
+document.getElementById('btnSnap').addEventListener('click', function(){
+  snapEnabled = !snapEnabled;
+  this.classList.toggle('active', snapEnabled);
+});
+
+document.getElementById('btnDelete').addEventListener('click', deleteSelected);
+document.getElementById('btnToggleLock').addEventListener('click', toggleLockSelected);
+
+// ---------------- layering ----------------
+function applyZOrder(){
+  zOrder.forEach(id=>{
+    const node = document.getElementById(id);
+    if(node) elLayer.appendChild(node);
+  });
+}
+function bringToFront(){
+  const ids = selectedIds.length? selectedIds.slice() : (selectedId? [selectedId] : []);
+  if(!ids.length) return;
+  ids.forEach(id=>{
+    const idx = zOrder.indexOf(id);
+    if(idx!==-1){ zOrder.splice(idx,1); zOrder.push(id); }
+  });
+  applyZOrder(); commit();
+}
+function sendToBack(){
+  const ids = selectedIds.length? selectedIds.slice() : (selectedId? [selectedId] : []);
+  if(!ids.length) return;
+  ids.forEach(id=>{
+    const idx = zOrder.indexOf(id);
+    if(idx!==-1){ zOrder.splice(idx,1); zOrder.unshift(id); }
+  });
+  applyZOrder(); commit();
+}
+function bringForward(){
+  const id = selectedId; if(!id) return;
+  const idx = zOrder.indexOf(id);
+  if(idx===-1 || idx===zOrder.length-1) return;
+  const tmp = zOrder[idx]; zOrder[idx]=zOrder[idx+1]; zOrder[idx+1]=tmp;
+  applyZOrder(); commit();
+}
+function sendBackward(){
+  const id = selectedId; if(!id) return;
+  const idx = zOrder.indexOf(id);
+  if(idx<=0) return;
+  const tmp = zOrder[idx]; zOrder[idx]=zOrder[idx-1]; zOrder[idx-1]=tmp;
+  applyZOrder(); commit();
+}
+document.getElementById('btnToFront').addEventListener('click', bringToFront);
+document.getElementById('btnForward').addEventListener('click', bringForward);
+document.getElementById('btnBackward').addEventListener('click', sendBackward);
+document.getElementById('btnToBack').addEventListener('click', sendToBack);
+
+// ---------------- sub-toolbar (contextual settings) ----------------
+let drawSettings = {color:'#ff7a45', size:8};
+let lineSettings = {color:'#5bc0be', width:4, arrow:true};
+let textDefaults = {size:28, color:'#e7e9ec', bold:false, underline:false, box:false};
+// export/compression settings (editable in export modal)
+let exportSettings = { quality: 0.85, maxImageDim: 800 };
+
+function renderSubbar(){
+  const bar = document.getElementById('subbar');
+  bar.innerHTML = '';
+  let show = false;
+
+  // reflect lock state on the toolbar button: disabled with nothing selected,
+  // highlighted when the whole current selection is already locked
+  const lockBtn = document.getElementById('btnToggleLock');
+  if(lockBtn){
+    const ids = selectedIds.length ? selectedIds : (selectedId ? [selectedId] : []);
+    lockBtn.classList.toggle('disabled', ids.length===0);
+    lockBtn.classList.toggle('active', ids.length>0 && ids.every(isLocked));
+    lockBtn.title = (ids.length>0 && ids.every(isLocked)) ? 'Unlock selected' : 'Lock selected';
+  }
+
+  if(tool==='draw'){
+    show = true;
+    bar.innerHTML = `
+      <label>Color <input type="color" id="drawColor" value="${drawSettings.color}"></label>
+      <label>Size <input type="range" id="drawSize" min="1" max="60" value="${drawSettings.size}"><span id="drawSizeVal">${drawSettings.size}</span></label>`;
+    bar.querySelector('#drawColor').oninput = e=> drawSettings.color = e.target.value;
+    bar.querySelector('#drawSize').oninput = e=>{ drawSettings.size = +e.target.value; bar.querySelector('#drawSizeVal').textContent = e.target.value; };
+  } else if(tool==='line'){
+    show = true;
+    bar.innerHTML = `
+      <label>Color <input type="color" id="lineColor" value="${lineSettings.color}"></label>
+      <label>Width <input type="range" id="lineWidth" min="1" max="30" value="${lineSettings.width}"><span id="lineWidthVal">${lineSettings.width}</span></label>
+      <button id="arrowToggle" class="${lineSettings.arrow?'active':''}">Arrowhead</button>`;
+    bar.querySelector('#lineColor').oninput = e=> lineSettings.color = e.target.value;
+    bar.querySelector('#lineWidth').oninput = e=>{ lineSettings.width = +e.target.value; bar.querySelector('#lineWidthVal').textContent = e.target.value; };
+    bar.querySelector('#arrowToggle').onclick = function(){ lineSettings.arrow = !lineSettings.arrow; this.classList.toggle('active', lineSettings.arrow); };
+  } else if(tool==='text'){
+    show = true;
+    bar.innerHTML = `
+      <label>Color <input type="color" id="textColor" value="${textDefaults.color}"></label>
+      <label>Size <input type="number" id="textSize" value="${textDefaults.size}" min="6" max="300"></label>
+      <button id="tBoxToggle" class="${textDefaults.box?'active':''}">Box</button>
+      <button id="tBold" class="${textDefaults.bold?'active':''}"><b>B</b></button>
+      <button id="tUnder" class="${textDefaults.underline?'active':''}"><u>U</u></button>`;
+    bar.querySelector('#tBoxToggle').onclick = function(){ textDefaults.box = !textDefaults.box; this.classList.toggle('active', textDefaults.box); };
+    bar.querySelector('#textColor').oninput = e=> updateActiveTextStyle('color', e.target.value);
+    bar.querySelector('#textSize').oninput = e=> updateActiveTextStyle('fontSize', +e.target.value);
+    bar.querySelector('#tBold').onclick = function(){ textDefaults.bold=!textDefaults.bold; this.classList.toggle('active',textDefaults.bold); updateActiveTextStyle('bold', textDefaults.bold); };
+    bar.querySelector('#tUnder').onclick = function(){ textDefaults.underline=!textDefaults.underline; this.classList.toggle('active',textDefaults.underline); updateActiveTextStyle('underline', textDefaults.underline); };
+  } else if(selectedKind==='element' && selectedId){
+    const el = elements.find(e=>e.id===selectedId);
+    if(el && el.type==='text'){
+      show = true;
+      bar.innerHTML = `
+        <label>Color <input type="color" id="textColor" value="${el.color}"></label>
+        <label>Size <input type="number" id="textSize" value="${el.fontSize}" min="6" max="300"></label>
+        <button id="tBold" class="${el.bold?'active':''}"><b>B</b></button>
+        <button id="tUnder" class="${el.underline?'active':''}"><u>U</u></button>`;
+      bar.querySelector('#textColor').oninput = e=>{ el.color=e.target.value; updateElementDOM(el); };
+      bar.querySelector('#textColor').addEventListener('change', ()=> commit());
+      bar.querySelector('#textSize').addEventListener('change', e=>{ el.fontSize=+e.target.value; updateElementDOM(el); commit(); });
+      bar.querySelector('#tBold').onclick = function(){ el.bold=!el.bold; this.classList.toggle('active',el.bold); updateElementDOM(el); commit(); };
+      bar.querySelector('#tUnder').onclick = function(){ el.underline=!el.underline; this.classList.toggle('active',el.underline); updateElementDOM(el); commit(); };
+      // show per-element box toggle
+      const boxBtn = document.createElement('button'); boxBtn.textContent='Box'; boxBtn.className = el.box?'active':'';
+      boxBtn.onclick = function(){ el.box = !el.box; this.classList.toggle('active', el.box); updateElementDOM(el); commit(); };
+      bar.appendChild(boxBtn);
+    }
+  } else if(selectedKind==='vector' && selectedId){
+    const v = vectors.find(x=>x.id===selectedId);
+    if(v && v.type==='line'){
+      show = true;
+      bar.innerHTML = `
+        <label>Color <input type="color" id="lineColor" value="${v.color}"></label>
+        <label>Width <input type="range" id="lineWidth" min="1" max="30" value="${v.width}"><span>${v.width}</span></label>
+        <button id="arrowToggle" class="${v.arrow?'active':''}">Arrowhead</button>`;
+      bar.querySelector('#lineColor').oninput = e=>{ v.color=e.target.value; renderVector(v); };
+      bar.querySelector('#lineColor').addEventListener('change', ()=> commit());
+      bar.querySelector('#lineWidth').oninput = e=>{ v.width=+e.target.value; renderVector(v); };
+      bar.querySelector('#lineWidth').addEventListener('change', ()=> commit());
+      bar.querySelector('#arrowToggle').onclick = function(){ v.arrow=!v.arrow; this.classList.toggle('active', v.arrow); renderVector(v); commit(); };
+    }
+  }
+  // Opacity: applies to any current selection (single element, single vector, or a
+  // multi-select group), appended alongside whatever type-specific controls are already
+  // shown above (or shown on its own for object types — images, freehand paths — that
+  // don't have other per-type controls yet).
+  const selIds = selectedIds.length ? selectedIds : (selectedId ? [selectedId] : []);
+  if(selIds.length && tool==='select'){
+    show = true;
+    const first = getOpacity(selIds[0]);
+    const pct = Math.round(first*100);
+    const wrap = document.createElement('label');
+    wrap.innerHTML = `Opacity <input type="range" id="opacitySlider" min="0" max="100" value="${pct}"><span id="opacityVal">${pct}%</span>`;
+    bar.appendChild(wrap);
+    const slider = wrap.querySelector('#opacitySlider');
+    const valSpan = wrap.querySelector('#opacityVal');
+    slider.oninput = (e)=>{
+      const val = (+e.target.value)/100;
+      valSpan.textContent = e.target.value+'%';
+      applyOpacityToSelection(selIds, val);
+    };
+    slider.addEventListener('change', ()=> commit());
+  }
+  bar.classList.toggle('show', show);
+}
+function getOpacity(id){
+  const el = elements.find(x=>x.id===id); if(el) return el.opacity==null ? 1 : el.opacity;
+  const v = vectors.find(x=>x.id===id); if(v) return v.opacity==null ? 1 : v.opacity;
+  return 1;
+}
+function applyOpacityToSelection(ids, val){
+  ids.forEach(id=>{
+    const el = elements.find(x=>x.id===id);
+    if(el){ el.opacity = val; updateElementDOM(el); return; }
+    const v = vectors.find(x=>x.id===id);
+    if(v){ v.opacity = val; renderVector(v); }
+  });
+}
+function updateActiveTextStyle(prop, val){
+  if(selectedKind==='element'){
+    const el = elements.find(e=>e.id===selectedId);
+    if(el && el.type==='text'){ el[prop]=val; updateElementDOM(el); }
+  }
+}
+
+// ---------------- pan & zoom ----------------
+let isPanning=false, panStart=null, spaceHeld=false;
+
+viewport.addEventListener('mousedown', (e)=>{
+  if(e.button===1 || (e.button===0 && spaceHeld)){
+    isPanning=true; panStart={x:e.clientX-pan.x, y:e.clientY-pan.y};
+    viewport.classList.add('panning');
+    e.preventDefault();
+  }
+});
+// track last pointer for paste placement
+viewport.addEventListener('mousemove', (e)=>{ lastPointerClient = {x:e.clientX, y:e.clientY}; });
+
+const onPanMove = rafThrottle((clientX, clientY)=>{
+  pan.x = clientX - panStart.x;
+  pan.y = clientY - panStart.y;
+  applyTransform();
+});
+window.addEventListener('mousemove',(e)=>{
+  if(isPanning) onPanMove(e.clientX, e.clientY);
+});
+window.addEventListener('mouseup',()=>{
+  if(isPanning){ isPanning=false; viewport.classList.remove('panning'); }
+});
+window.addEventListener('keydown', e=>{
+  if(e.code==='Space'){ spaceHeld=true; if(!isTypingTarget(e)) e.preventDefault(); }
+  if((e.key==='Delete' || e.key==='Backspace') && !isTypingTarget(e)){
+    e.preventDefault();
+    deleteSelected();
+  }
+  const meta = e.ctrlKey || e.metaKey;
+  // select all (Ctrl/Cmd + A)
+  if(meta && e.key.toLowerCase()==='a' && !isTypingTarget(e)){
+    e.preventDefault();
+    // select all elements and vectors
+    const ids = zOrder.slice();
+    if(!ids.length) return;
+    deselect();
+    ids.forEach(id=>{ const node=document.getElementById(id); if(node) node.classList.add('selected'); });
+    selectedIds = ids.slice();
+    if(selectedIds.length>1) showGroupOverlay(selectedIds);
+    renderSubbar();
+    return;
+  }
+  if(meta && e.key.toLowerCase()==='z' && !isTypingTarget(e)){
+    e.preventDefault();
+    if(e.shiftKey) redo(); else undo();
+  } else if(meta && e.key.toLowerCase()==='y' && !isTypingTarget(e)){
+    e.preventDefault(); redo();
+  }
+  // copy via keyboard (paste is handled entirely by the native 'paste' event below —
+  // preventDefault()-ing Ctrl+V here would suppress that event and break pasting images
+  // copied from outside the app, e.g. from a web page)
+  if(meta && !isTypingTarget(e)){
+    if(e.key.toLowerCase()==='c'){
+      e.preventDefault(); copySelected();
+    }
+  }
+  if(!isTypingTarget(e) && !meta){
+    if(e.key==='v'||e.key==='V') setTool('select');
+    if(e.key==='t'||e.key==='T') setTool('text');
+    if(e.key==='l'||e.key==='L') setTool('line');
+    if(e.key==='d'||e.key==='D') setTool('draw');
+    // arrow-key nudge: 1px per press, 10px with Shift. Bypasses grid snap on purpose —
+    // arrows are the fine-adjustment override, not a snapped move.
+    if(e.key==='ArrowUp'||e.key==='ArrowDown'||e.key==='ArrowLeft'||e.key==='ArrowRight'){
+      e.preventDefault();
+      const step = e.shiftKey ? 10 : 1;
+      const dx = e.key==='ArrowLeft' ? -step : e.key==='ArrowRight' ? step : 0;
+      const dy = e.key==='ArrowUp' ? -step : e.key==='ArrowDown' ? step : 0;
+      if(dx || dy) nudgeSelection(dx, dy);
+    }
+  }
+});
+window.addEventListener('keyup', e=>{ if(e.code==='Space') spaceHeld=false; });
+function isTypingTarget(e){
+  const t = e.target;
+  return t && (t.isContentEditable || t.tagName==='INPUT');
+}
+
+viewport.addEventListener('wheel', (e)=>{
+  e.preventDefault();
+  const r = viewport.getBoundingClientRect();
+  const mx = e.clientX - r.left, my = e.clientY - r.top;
+  const worldBefore = { x:(mx-pan.x)/zoom, y:(my-pan.y)/zoom };
+  const factor = Math.exp(-e.deltaY*0.0015);
+  zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom*factor));
+  pan.x = mx - worldBefore.x*zoom;
+  pan.y = my - worldBefore.y*zoom;
+  applyTransform();
+}, {passive:false});
+
+viewport.addEventListener('contextmenu', e=> e.preventDefault());
+
+// ---------------- selection helpers ----------------
+function deselect(){
+  selectedId=null; selectedKind=null; selectedIds = [];
+  document.querySelectorAll('.obj.selected').forEach(o=>o.classList.remove('selected'));
+  document.querySelectorAll('.obj .handle, .obj .rot-stem').forEach(h=>h.remove());
+  document.querySelectorAll('.line-handle').forEach(h=>h.remove());
+  clearVectorHandles();
+  removeGroupOverlay();
+  renderSubbar();
+}
+function addToSelection(id, kind){
+  if(!selectedIds.includes(id)){
+    // clear single-selection handles
+    document.querySelectorAll('.obj .handle, .obj .rot-stem').forEach(h=>h.remove());
+    document.querySelectorAll('.line-handle').forEach(h=>h.remove());
+    clearVectorHandles();
+    selectedIds.push(id);
+    selectedId = null; selectedKind = null;
+    const node=document.getElementById(id); if(node) node.classList.add('selected');
+    if(selectedIds.length>1){ showGroupOverlay(selectedIds); recomputeGroupBBox(); }
+    renderSubbar();
+  }
+}
+function removeFromSelection(id){
+  selectedIds = selectedIds.filter(x=>x!==id);
+  const node=document.getElementById(id); if(node){ node.classList.remove('selected'); node.querySelectorAll('.handle, .rot-stem').forEach(h=>h.remove()); }
+  document.querySelectorAll('.line-handle').forEach(h=>h.remove());
+  clearVectorHandles();
+  if(selectedIds.length===0) { deselect(); }
+  else if(selectedIds.length===1){ selectedId=selectedIds[0]; selectedKind = elements.find(e=>e.id===selectedId)?'element':'vector';
+    // restore single-item handles for the remaining selection (skip if locked)
+    const wrap = document.getElementById(selectedId);
+    const el = elements.find(e=>e.id===selectedId);
+    if(el && wrap){ if(!el.locked) addResizeHandles(wrap, el); }
+    else { const v = vectors.find(x=>x.id===selectedId); if(v && !v.locked){ if(v.type==='line') addLineHandles(v); addVectorHandles(v); } }
+    renderSubbar(); }
+  else { showGroupOverlay(selectedIds); renderSubbar(); }
+}
+function select(id, kind){
+  deselect();
+  selectedId = id; selectedKind = kind;
+  // maintain selectedIds for shift-click behaviors
+  selectedIds = [id];
+  if(kind==='element'){
+    const wrap = document.getElementById(id);
+    if(wrap){
+      wrap.classList.add('selected');
+      const el = elements.find(x=>x.id===id);
+      // locked objects stay selectable (so Lock can be toggled back off) but show no
+      // resize/rotate handles, since they can't be transformed while locked
+      if(el && !el.locked) addResizeHandles(wrap, el);
+    }
+  } else if(kind==='vector'){
+    const wrap = document.getElementById(id);
+    if(wrap) wrap.classList.add('selected');
+    const v = vectors.find(x=>x.id===id);
+    if(v && !v.locked){
+      if(v.type==='line') addLineHandles(v);
+      addVectorHandles(v);
+    }
+  }
+  renderSubbar();
+}
+
+function deleteSelected(){
+  const ids = selectedIds.length? selectedIds.slice() : (selectedId? [selectedId] : []);
+  if(!ids.length) return;
+  // locked objects are protected from deletion — unlock first
+  const toDelete = ids.filter(id=>!isLocked(id));
+  if(!toDelete.length) return;
+  toDelete.forEach(id=>{
+    elements = elements.filter(e=>e.id!==id);
+    vectors = vectors.filter(v=>v.id!==id);
+    const node = document.getElementById(id); if(node) node.remove();
+    zOrder = zOrder.filter(z=>z!==id);
+  });
+  deselect();
+  commit();
+}
+
+// Arrow-key nudge for the current selection. Moves immediately for responsiveness but
+// only commits to undo history after a short pause, so holding an arrow key (or repeated
+// taps) collapses into one undo step instead of one per pixel.
+let nudgeCommitTimer = null;
+function nudgeSelection(dx, dy){
+  const ids = selectedIds.length ? selectedIds.slice() : (selectedId ? [selectedId] : []);
+  if(!ids.length) return;
+  ids.forEach(id=>{
+    const el = elements.find(x=>x.id===id);
+    if(el){
+      if(el.locked) return;
+      el.x += dx; el.y += dy;
+      updateElementDOM(el);
+      return;
+    }
+    const v = vectors.find(x=>x.id===id);
+    if(v){
+      if(v.locked) return;
+      if(v.type==='line'){ v.x1+=dx; v.y1+=dy; v.x2+=dx; v.y2+=dy; }
+      else { v.points = v.points.map(p=>[p[0]+dx, p[1]+dy]); }
+      renderVector(v);
+    }
+  });
+  if(groupOverlay) recomputeGroupBBox();
+  clearTimeout(nudgeCommitTimer);
+  nudgeCommitTimer = setTimeout(commit, 400);
+}
+
+function isLocked(id){
+  const el = elements.find(x=>x.id===id); if(el) return !!el.locked;
+  const v = vectors.find(x=>x.id===id); if(v) return !!v.locked;
+  return false;
+}
+
+function toggleLockSelected(){
+  const ids = selectedIds.length ? selectedIds.slice() : (selectedId ? [selectedId] : []);
+  if(!ids.length) return;
+  // if every selected item is already locked, this click unlocks them all; otherwise it locks them all
+  const allLocked = ids.every(isLocked);
+  const next = !allLocked;
+  ids.forEach(id=>{
+    const el = elements.find(x=>x.id===id);
+    if(el){ el.locked = next; updateElementDOM(el); return; }
+    const v = vectors.find(x=>x.id===id);
+    if(v){ v.locked = next; renderVector(v); }
+  });
+  // re-select so handles are added/removed to match the new lock state
+  if(ids.length===1){ select(ids[0], elements.find(x=>x.id===ids[0]) ? 'element':'vector'); }
+  else { selectedIds = ids; selectedId=null; selectedKind=null; showGroupOverlay(ids); recomputeGroupBBox(); }
+  renderSubbar();
+  commit();
+}
+
+// unified selection/mousedown flow: handles selection, marquee start, and tool starts
+viewport.addEventListener('mousedown', (e)=>{
+  if(e.button!==0) return;
+  if(spaceHeld) return;
+  const client = {x:e.clientX, y:e.clientY};
+  const pos = clientToWorld(client.x, client.y);
+
+  // quick-handled tools: text/draw/line start immediately
+  if(tool==='text'){ createTextAt(pos.x, pos.y); return; }
+  if(tool==='draw'){ startFreeDraw(pos); return; }
+  if(tool==='line'){ startLineDraw(pos); return; }
+
+  if(tool==='select'){
+    // hit-test topmost object under cursor
+    let hit=null; try{ hit = document.elementFromPoint(client.x, client.y); }catch(_){ }
+    const obj = (hit && hit.closest) ? hit.closest('.obj') : null;
+    if(obj){
+      // clicked on an object (or its handle) — this path is reached for hits that land
+      // on a wrapper's own area without an inner element handler already having consumed
+      // the event (e.g. the padding zone around a thin line/path). Route it through the
+      // same shift-select / group-drag rules as every other object type for consistency.
+      const id = obj.id;
+      if(e.shiftKey){
+        // toggle selection
+        if(selectedIds.includes(id)) removeFromSelection(id); else addToSelection(id, elements.find(x=>x.id===id)?'element':'vector');
+        return;
+      }
+      if(selectedIds.length>1 && selectedIds.includes(id)){
+        startMultiDrag(e, selectedIds);
+        return;
+      }
+      // select single item
+      select(id, elements.find(x=>x.id===id)?'element':'vector');
+      // let element's own mousedown handlers handle dragging/resizing
+      return;
+    }
+    // clicked empty canvas: clear selection and start marquee
+    deselect();
+    startMarquee(client.x, client.y);
+  }
+});
+
+// simple rule: on mouseup over empty canvas, clear selection (applies to single or multi-select).
+// Guarded against firing right after a drag/resize/rotate/group-transform: those operations
+// routinely end with the cursor off the (now moved/resized) object, which would otherwise
+// wrongly deselect immediately after the operation completes.
+viewport.addEventListener('mouseup', (e)=>{
+  if(tool!=='select') return;
+  // ignore if marquee is active (marquee finish will handle selection)
+  if(marqueeEl) return;
+  // ignore if an object/handle drag just concluded on this same mouseup
+  if(dragging) return;
+  try{
+    const hit = document.elementFromPoint(e.clientX, e.clientY);
+    if(!(hit && hit.closest && hit.closest('.obj'))){ deselect(); }
+  }catch(_){ }
+});
+
+// (removed) capturing click listener — using a single capturing mouseup handler instead
+
+// marquee selection
+let marqueeEl = null, marqueeStart = null;
+function startMarquee(clientX, clientY){
+  marqueeStart = {x:clientX, y:clientY};
+  marqueeEl = document.createElement('div');
+  marqueeEl.style.position='fixed'; marqueeEl.style.left=clientX+'px'; marqueeEl.style.top=clientY+'px';
+  marqueeEl.style.width='0px'; marqueeEl.style.height='0px'; marqueeEl.style.border='1px dashed #5bc0be'; marqueeEl.style.background='rgba(91,192,190,0.08)'; marqueeEl.style.zIndex=60;
+  document.body.appendChild(marqueeEl);
+  function onMove(ev){ updateMarquee(ev.clientX, ev.clientY); }
+  function onUp(ev){ finishMarquee(ev.clientX, ev.clientY); window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); }
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+}
+function updateMarquee(cx, cy){
+  const x = Math.min(cx, marqueeStart.x), y = Math.min(cy, marqueeStart.y);
+  const w = Math.abs(cx-marqueeStart.x), h = Math.abs(cy-marqueeStart.y);
+  marqueeEl.style.left = x+'px'; marqueeEl.style.top = y+'px'; marqueeEl.style.width = w+'px'; marqueeEl.style.height = h+'px';
+  // Hit-test against each object's actual on-screen bounding box (getBoundingClientRect),
+  // rather than approximating from stored x/y/w/h. This is what makes marquee selection
+  // agree with what's visually inside the box for every object type: text (whose true
+  // width isn't stored and was previously guessed from font size), rotated images/text
+  // (whose axis-aligned footprint differs from their unrotated w/h), and lines/paths alike.
+  const mx1 = x, my1 = y, mx2 = x + w, my2 = y + h;
+  const sel = [];
+  elLayer.querySelectorAll(':scope > .obj').forEach(node=>{
+    if(isLocked(node.id)) return; // locked objects aren't swept into a fresh marquee selection
+    const r = node.getBoundingClientRect();
+    if(r.right>=mx1 && r.left<=mx2 && r.bottom>=my1 && r.top<=my2) sel.push(node.id);
+  });
+  // highlight selection
+  document.querySelectorAll('.obj.selected').forEach(o=>o.classList.remove('selected'));
+  sel.forEach(id=>{ const n = document.getElementById(id); if(n) n.classList.add('selected'); });
+  selectedIds = sel;
+}
+function finishMarquee(cx, cy){
+  if(marqueeEl) marqueeEl.remove(); marqueeEl=null;
+  if(selectedIds.length===1){ const id = selectedIds[0]; const kind = elements.find(e=>e.id===id)?'element':'vector'; select(id, kind); }
+  else if(selectedIds.length>1){ selectedId = selectedIds[0]; selectedKind = elements.find(e=>e.id===selectedId)?'element':'vector'; renderSubbar(); }
+  else deselect();
+  if(selectedIds.length>1) showGroupOverlay(selectedIds);
+}
+
+// ---------------- group overlay (multi-select transform) ----------------
+let groupOverlay = null;
+// Computes the true rotation-aware bounding box for a set of element/vector ids,
+// straight from their stored geometry (x/y/w/h/rot for elements, points for vectors).
+// Shared by showGroupOverlay (initial box) and recomputeGroupBBox (during transforms) so
+// the overlay is correct from the very first frame instead of only "snapping" into place
+// once a transform recomputes it.
+function computeGroupBBox(ids){
+  let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+  ids.forEach(id=>{
+    const el = elements.find(x=>x.id===id);
+    if(el){
+      const ew = el.w!=null?el.w:nodeWidthFallback(el);
+      const eh = el.h!=null?el.h:(el.fontSize||28)*1.4;
+      const cx = el.x + ew/2, cy = el.y + eh/2;
+      const ang = (el.rot||0) * Math.PI/180;
+      const corners = [[-ew/2,-eh/2],[ew/2,-eh/2],[ew/2,eh/2],[-ew/2,eh/2]];
+      corners.forEach(c=>{
+        const rx = c[0]*Math.cos(ang) - c[1]*Math.sin(ang);
+        const ry = c[0]*Math.sin(ang) + c[1]*Math.cos(ang);
+        const x = cx + rx, y = cy + ry;
+        minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+      });
+      return;
+    }
+    const v = vectors.find(x=>x.id===id);
+    if(v){ const b = vectorBounds(v); minX = Math.min(minX, b.minX); minY = Math.min(minY, b.minY); maxX = Math.max(maxX, b.maxX); maxY = Math.max(maxY, b.maxY); }
+  });
+  if(minX===Infinity) return null;
+  return {minX, minY, maxX, maxY};
+}
+
+function showGroupOverlay(ids){ removeGroupOverlay(); if(!ids || ids.length<2) return;
+  const bbox = computeGroupBBox(ids);
+  if(!bbox) return;
+  const {minX, minY, maxX, maxY} = bbox;
+  const ov = document.createElement('div'); ov.className='group-overlay'; ov.id='groupOverlay';
+  ov.style.left = (minX)+'px'; ov.style.top = (minY)+'px'; ov.style.width = (maxX-minX)+'px'; ov.style.height = (maxY-minY)+'px';
+  // create handles
+  const se = document.createElement('div'); se.className='g-handle se'; se.style.right='-10px'; se.style.bottom='-10px'; se.style.cursor='nwse-resize'; ov.appendChild(se);
+  const rot = document.createElement('div'); rot.className='g-rot'; ov.appendChild(rot);
+  // scale handles to remain constant screen size
+  se.style.transform = `scale(${1/zoom})`; se.style.transformOrigin='center center';
+  rot.style.transform = `scale(${1/zoom})`; rot.style.transformOrigin='center center';
+  elLayer.appendChild(ov);
+  groupOverlay = {node:ov, ids:ids.slice(), bbox:{minX,minY,maxX,maxY}};
+  // handlers
+  se.addEventListener('mousedown', (e)=> startGroupScale(e));
+  rot.addEventListener('mousedown', (e)=> startGroupRotate(e));
+}
+function updateGroupOverlay(){ if(!groupOverlay) return; const bbox = groupOverlay.bbox; const ov=groupOverlay.node; ov.style.left=bbox.minX+'px'; ov.style.top=bbox.minY+'px'; ov.style.width=(bbox.maxX-bbox.minX)+'px'; ov.style.height=(bbox.maxY-bbox.minY)+'px'; }
+function removeGroupOverlay(){ if(groupOverlay && groupOverlay.node) groupOverlay.node.remove(); groupOverlay=null; }
+
+function recomputeGroupBBox(){
+  if(!groupOverlay) return;
+  const bbox = computeGroupBBox(groupOverlay.ids);
+  if(!bbox) return;
+  groupOverlay.bbox.minX = bbox.minX; groupOverlay.bbox.minY = bbox.minY; groupOverlay.bbox.maxX = bbox.maxX; groupOverlay.bbox.maxY = bbox.maxY; updateGroupOverlay();
+}
+
+
+function startGroupRotate(e){
+  // only left-button should start a group rotate
+  if(e.button!==0) return;
+  e.stopPropagation(); e.preventDefault(); if(!groupOverlay) return; dragging = true; const ov=groupOverlay.node; const rect = ov.getBoundingClientRect(); const cx = rect.left + rect.width/2, cy = rect.top + rect.height/2;
+  // compute world-space center of group and start angle in world space
+  const bboxCenterX = (groupOverlay.bbox.minX + groupOverlay.bbox.maxX)/2;
+  const bboxCenterY = (groupOverlay.bbox.minY + groupOverlay.bbox.maxY)/2;
+  const startWorld = clientToWorld(e.clientX, e.clientY);
+  const startAngle = Math.atan2(startWorld.y - bboxCenterY, startWorld.x - bboxCenterX);
+  const original = groupOverlay.ids.filter(id=>!isLocked(id)).map(id=>{
+    const el = elements.find(x=>x.id===id);
+    const node = document.getElementById(id);
+    if(el){
+      // compute visual center from DOM rect and convert to world coords
+      let cxEl = el.x + (el.w||nodeWidthFallback(el))/2, cyEl = el.y + ((el.h)||((el.fontSize||28)*1.4))/2;
+      if(node){ const r=node.getBoundingClientRect(); const wc = clientToWorld(r.left + r.width/2, r.top + r.height/2); cxEl = wc.x; cyEl = wc.y; }
+      const ew = el.w!=null ? el.w : nodeWidthFallback(el);
+      const eh = el.h!=null ? el.h : (el.fontSize||28)*1.4;
+      return {id, kind:'element', el, cxEl, cyEl, x:el.x, y:el.y, rot:el.rot||0, ew, eh};
+    }
+    const v = vectors.find(x=>x.id===id);
+    if(v){
+      if(v.type==='line'){
+        return {id, kind:'vector-line', v, ox1:v.x1, oy1:v.y1, ox2:v.x2, oy2:v.y2, bbox:vectorBounds(v)};
+      } else if(v.type==='path'){
+        return {id, kind:'vector-path', v, opoints:v.points.map(p=>[p[0],p[1]]), bbox:vectorBounds(v)};
+      }
+    }
+    return {id, kind:'unknown'};
+  });
+  const onMove = rafThrottle((mx,my,shiftKey)=>{
+    const curWorld = clientToWorld(mx,my);
+    const ang = Math.atan2(curWorld.y - bboxCenterY, curWorld.x - bboxCenterX);
+    let delta = (ang - startAngle) * 180/Math.PI;
+    if(shiftKey) delta = snapAngle(delta);
+    const rad = delta * Math.PI/180;
+    original.forEach(o=>{
+      if(o.kind==='element'){
+        const dx = o.cxEl - bboxCenterX; const dy = o.cyEl - bboxCenterY;
+        const nx = (dx*Math.cos(rad) - dy*Math.sin(rad));
+        const ny = (dx*Math.sin(rad) + dy*Math.cos(rad));
+        const newCx = bboxCenterX + nx, newCy = bboxCenterY + ny;
+        o.el.x = snap(newCx - o.ew/2); o.el.y = snap(newCy - o.eh/2); o.el.rot = Math.round(o.rot + delta);
+        markDirty(o.el.id);
+      } else if(o.kind==='vector-line'){
+        const v = o.v;
+        const px1 = o.ox1 - bboxCenterX, py1 = o.oy1 - bboxCenterY;
+        const px2 = o.ox2 - bboxCenterX, py2 = o.oy2 - bboxCenterY;
+        const rx1 = px1*Math.cos(rad) - py1*Math.sin(rad), ry1 = px1*Math.sin(rad) + py1*Math.cos(rad);
+        const rx2 = px2*Math.cos(rad) - py2*Math.sin(rad), ry2 = px2*Math.sin(rad) + py2*Math.cos(rad);
+        v.x1 = snap(bboxCenterX + rx1); v.y1 = snap(bboxCenterY + ry1);
+        v.x2 = snap(bboxCenterX + rx2); v.y2 = snap(bboxCenterY + ry2);
+        markDirty(v.id);
+      } else if(o.kind==='vector-path'){
+        const v = o.v;
+        v.points = o.opoints.map(p=>{ const px = p[0]-bboxCenterX, py = p[1]-bboxCenterY; const rx = px*Math.cos(rad) - py*Math.sin(rad); const ry = px*Math.sin(rad) + py*Math.cos(rad); return [ snap(bboxCenterX + rx), snap(bboxCenterY + ry) ]; });
+        markDirty(v.id);
+      }
+    });
+    recomputeGroupBBox();
+  });
+  function handleMove(ev){ onMove(ev.clientX, ev.clientY, ev.shiftKey); }
+  function onUp(){ dragging = false; window.removeEventListener('mousemove', handleMove); window.removeEventListener('mouseup', onUp); commit(); }
+  window.addEventListener('mousemove', handleMove); window.addEventListener('mouseup', onUp);
+}
+function nodeWidthFallback(el){ return el.w || (el.text? (el.text.length* (el.fontSize||28)*0.55) : 80); }
+
+function startGroupScale(e){
+  // only left-button should start a group scale
+  if(e.button!==0) return;
+  e.stopPropagation(); e.preventDefault(); if(!groupOverlay) return; dragging = true; const ov = groupOverlay.node; const rect = ov.getBoundingClientRect(); const cx = rect.left + rect.width/2, cy = rect.top + rect.height/2;
+  const startPW = clientToWorld(e.clientX, e.clientY);
+  const bboxCenterX = (groupOverlay.bbox.minX + groupOverlay.bbox.maxX)/2;
+  const bboxCenterY = (groupOverlay.bbox.minY + groupOverlay.bbox.maxY)/2;
+  const startDist = Math.hypot(startPW.x - bboxCenterX, startPW.y - bboxCenterY) || 1;
+  const originals = groupOverlay.ids.filter(id=>!isLocked(id)).map(id=>{
+    const el = elements.find(x=>x.id===id);
+    if(el){ const ew = el.w!=null?el.w:nodeWidthFallback(el); const eh = el.h!=null?el.h: (el.fontSize||28)*1.4; return {id, kind:'element', el, x:el.x, y:el.y, ew, eh, fontSize:el.fontSize||28, cxEl:el.x+ew/2, cyEl:el.y+eh/2}; }
+    const v = vectors.find(x=>x.id===id);
+    if(v){ if(v.type==='line') return {id, kind:'vector-line', v, ox1:v.x1, oy1:v.y1, ox2:v.x2, oy2:v.y2, bbox:vectorBounds(v)}; if(v.type==='path') return {id, kind:'vector-path', v, opoints:v.points.map(p=>[p[0],p[1]]), bbox:vectorBounds(v)}; }
+    return {id, kind:'unknown'};
+  });
+  // replace centers with DOM-derived centers for visual correctness
+  originals.forEach(o=>{ const node=document.getElementById(o.id); if(node){ const r=node.getBoundingClientRect(); const wc = clientToWorld(r.left + r.width/2, r.top + r.height/2); o.cxEl = wc.x; o.cyEl = wc.y; } });
+  const startBBoxW = groupOverlay.bbox.maxX - groupOverlay.bbox.minX;
+  const startBBoxH = groupOverlay.bbox.maxY - groupOverlay.bbox.minY;
+  const onMove = rafThrottle((mx,my)=>{
+    const pw = clientToWorld(mx, my);
+    const dist = Math.hypot(pw.x - bboxCenterX, pw.y - bboxCenterY);
+    const s = Math.max(0.05, Math.min(5, dist / startDist));
+    originals.forEach(o=>{
+      if(o.kind==='element'){
+        const dx = o.cxEl - bboxCenterX; const dy = o.cyEl - bboxCenterY;
+        const newCx = bboxCenterX + dx * s; const newCy = bboxCenterY + dy * s;
+        const newW = o.ew * s; const newH = o.eh * s;
+        o.el.x = snap(newCx - newW/2); o.el.y = snap(newCy - newH/2);
+        if(o.el.w!=null) o.el.w = Math.max(6, Math.round(newW));
+        if(o.el.h!=null) o.el.h = Math.max(6, Math.round(newH));
+        if(o.fontSize) o.el.fontSize = Math.max(6, Math.round(o.fontSize * s));
+        markDirty(o.el.id);
+      } else if(o.kind==='vector-line'){
+        const v = o.v;
+        const cx1 = o.ox1 - bboxCenterX, cy1 = o.oy1 - bboxCenterY;
+        const cx2 = o.ox2 - bboxCenterX, cy2 = o.oy2 - bboxCenterY;
+        v.x1 = snap(bboxCenterX + cx1 * s); v.y1 = snap(bboxCenterY + cy1 * s);
+        v.x2 = snap(bboxCenterX + cx2 * s); v.y2 = snap(bboxCenterY + cy2 * s);
+        markDirty(v.id);
+      } else if(o.kind==='vector-path'){
+        const v = o.v;
+        v.points = o.opoints.map(p=>[ snap(bboxCenterX + (p[0]-bboxCenterX)*s), snap(bboxCenterY + (p[1]-bboxCenterY)*s) ]);
+        markDirty(v.id);
+      }
+    });
+    recomputeGroupBBox();
+  });
+  function handleMove(ev){ onMove(ev.clientX, ev.clientY); }
+  function onUp(){ dragging = false; window.removeEventListener('mousemove', handleMove); window.removeEventListener('mouseup', onUp); commit(); }
+  window.addEventListener('mousemove', handleMove); window.addEventListener('mouseup', onUp);
+}
+
+// ================= IMAGE ELEMENTS =================
+document.getElementById('btnImport').addEventListener('click', ()=> document.getElementById('fileInput').click());
+document.getElementById('fileInput').addEventListener('change', (e)=>{
+  const files = Array.from(e.target.files || []);
+  let offset = 0;
+  files.forEach(f=>{
+    const reader = new FileReader();
+    reader.onload = ()=> {
+      const img = new Image();
+      img.onload = ()=>{
+        const center = clientToWorld(window.innerWidth/2, window.innerHeight/2);
+        addImageElement(reader.result, img.naturalWidth, img.naturalHeight, center.x+offset, center.y+offset);
+        offset += 24;
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(f);
+  });
+  e.target.value = '';
+});
+
+function addImageElement(dataUrl, natW, natH, cx, cy){
+  // keep original image data and dimensions in-editor; compression/downscale only applied for exports
+  const w = natW, h = natH;
+  const el = { id:newId(), type:'image', src:dataUrl, x:snap(cx-w/2), y:snap(cy-h/2), w, h, rot:0 };
+  elements.push(el);
+  updateElementDOM(el);
+  select(el.id,'element');
+  commit();
+}
+
+// ================= TEXT ELEMENTS =================
+function createTextAt(x,y){
+  const el = {
+    id:newId(), type:'text', x:snap(x), y:snap(y), w:null, rot:0,
+    text:'', color:textDefaults.color, fontSize:textDefaults.size,
+    bold:textDefaults.bold, underline:textDefaults.underline, box:!!textDefaults.box
+  };
+  elements.push(el);
+  updateElementDOM(el);
+  select(el.id,'element');
+  setTool('select');
+  commit();
+  setTimeout(()=> enterTextEdit(el), 0);
+}
+
+function enterTextEdit(el){
+  const wrap = document.getElementById(el.id);
+  if(!wrap) return;
+  const inner = wrap.querySelector('.text-obj');
+  if(!inner) return;
+  inner.contentEditable = 'true';
+  inner.classList.add('editing');
+  // ensure editing behaves like initial create: no auto-wrap, expands horizontally
+  inner.style.whiteSpace = 'pre';
+  inner.style.wordBreak = 'normal';
+  wrap.style.width = 'auto';
+  inner.focus();
+  const range=document.createRange(); range.selectNodeContents(inner); range.collapse(false);
+  const sel=window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+}
+function exitTextEdit(el){
+  const wrap = document.getElementById(el.id);
+  if(!wrap) return;
+  const inner = wrap.querySelector('.text-obj');
+  if(!inner) return;
+  inner.contentEditable = 'false';
+  inner.classList.remove('editing');
+  // normalize newlines to \n and store
+  el.text = inner.innerText.replace(/\r\n/g,'\n');
+  // keep no-wrap behavior for text objects (no wrapping in view or edit)
+  inner.style.whiteSpace = 'pre'; inner.style.wordBreak = 'normal';
+}
+
+// ================= ELEMENT DOM (create once, update in place) =================
+function ensureElementDOM(el){
+  let wrap = document.getElementById(el.id);
+  if(wrap) return wrap;
+  wrap = document.createElement('div');
+  wrap.id = el.id;
+
+  if(el.type==='image'){
+    wrap.className = 'obj img-obj';
+    const img = document.createElement('img');
+    img.src = el.src;
+    img.draggable = false;
+    const frame = document.createElement('div');
+    frame.className = 'frame';
+    wrap.appendChild(img);
+    wrap.appendChild(frame);
+    elLayer.appendChild(wrap);
+    attachDragMove(wrap, el);
+    // prevent clicks on the element wrapper from bubbling to viewport (which would deselect)
+    wrap.addEventListener('click', (ev)=> ev.stopPropagation());
+  } else if(el.type==='text'){
+    wrap.className = 'obj text-wrap';
+    const inner = document.createElement('div');
+    inner.className = 'text-obj';
+    inner.contentEditable = 'false';
+    wrap.appendChild(inner);
+    elLayer.appendChild(wrap);
+    inner.addEventListener('blur', ()=>{ exitTextEdit(el); commit(); });
+    wrap.addEventListener('dblclick', (e)=>{ e.stopPropagation(); enterTextEdit(el); });
+    attachDragMove(wrap, el, inner);
+    // prevent clicks on the element wrapper from bubbling to viewport (which would deselect)
+    wrap.addEventListener('click', (ev)=> ev.stopPropagation());
+  }
+  zOrder.push(el.id);
+  return wrap;
+}
+
+function updateElementDOM(el){
+  const wrap = ensureElementDOM(el);
+  wrap.classList.toggle('locked', !!el.locked);
+  wrap.style.left = el.x+'px';
+  wrap.style.top = el.y+'px';
+  wrap.style.transform = `rotate(${el.rot||0}deg)`;
+  wrap.style.opacity = (el.opacity==null ? 1 : el.opacity);
+
+  if(el.type==='image'){
+    wrap.style.width = el.w+'px';
+    wrap.style.height = el.h+'px';
+  } else if(el.type==='text'){
+    const inner = wrap.querySelector('.text-obj');
+    // always use no-wrap behavior for text objects; editing state still controls contentEditable
+    wrap.style.width = 'auto';
+    inner.style.whiteSpace = 'pre';
+    inner.style.wordBreak = 'normal';
+    wrap.style.height = 'auto';
+    inner.style.color = el.color;
+    inner.style.fontSize = el.fontSize+'px';
+    inner.style.fontWeight = el.bold ? '700':'400';
+    inner.style.textDecoration = el.underline ? 'underline':'none';
+    // placeholder support
+    inner.dataset.placeholder = 'Text';
+    if(el.text){
+      inner.classList.remove('placeholder');
+      if(!inner.isContentEditable && inner.innerText !== el.text) inner.innerText = el.text;
+      inner.style.opacity = '';
+    } else {
+      inner.classList.add('placeholder');
+      if(!inner.isContentEditable) inner.innerText = '';
+      inner.style.opacity = '';
+    }
+    // box background
+    inner.style.background = el.box ? 'rgba(255,255,255,0.03)' : 'transparent';
+    inner.style.borderRadius = el.box ? '6px' : '';
+  }
+}
+
+// dragging (move) — works for both image & text wrappers
+function attachDragMove(wrap, el, textInner){
+  wrap.addEventListener('mousedown', (e)=>{
+    // only start drag with left mouse button
+    if(e.button!==0) return;
+    if(tool!=='select') return;
+    if(e.target.classList.contains('handle')) return;
+    if(textInner && textInner.isContentEditable) return;
+    e.stopPropagation();
+    // shift-click toggles selection without starting a drag
+    if(e.shiftKey){
+      if(selectedIds.includes(el.id)) removeFromSelection(el.id); else addToSelection(el.id,'element');
+      return;
+    }
+    // if multiple items are selected and this element is part of that selection, keep the multi-select
+    if(!(selectedIds.length>1 && selectedIds.includes(el.id))){ select(el.id,'element'); }
+    // if this element is part of the current multi-selection, drag the whole group
+    // (shared with line/path dragging so multi-select behaves the same for every object type)
+    if(selectedIds.length>1 && selectedIds.includes(el.id)){
+      startMultiDrag(e, selectedIds);
+      return;
+    }
+    // locked objects stay selectable (so "Lock" can be toggled back off) but can't be dragged
+    if(el.locked) return;
+    const startWorld = clientToWorld(e.clientX, e.clientY);
+    const startX = el.x, startY = el.y;
+    let moved = false;
+    dragging = true;
+    const onMove = rafThrottle((clientX, clientY, shiftKey)=>{
+      const w = clientToWorld(clientX, clientY);
+      const dx = w.x - startWorld.x, dy = w.y - startWorld.y;
+      el.x = snap(startX + dx, shiftKey);
+      el.y = snap(startY + dy, shiftKey);
+      updateElementDOM(el);
+      moved = true;
+    });
+    function handleMove(ev){ onMove(ev.clientX, ev.clientY, ev.shiftKey); }
+    function onUp(){
+      dragging = false;
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', onUp);
+      if(moved) commit();
+    }
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', onUp);
+  });
+}
+
+// shared multi-object drag: moves every currently-selected element/vector together,
+// regardless of which one (image, text, line, or path) the drag started on.
+function startMultiDrag(e, ids){
+  const startWorld = clientToWorld(e.clientX, e.clientY);
+  // locked members stay part of the selection (e.g. for a bulk unlock) but don't move
+  const multiStart = ids.filter(id=>!isLocked(id)).map(id=>{
+    const oe = elements.find(x=>x.id===id);
+    if(oe) return {id, kind:'element', x:oe.x, y:oe.y};
+    const ov = vectors.find(x=>x.id===id);
+    if(ov){
+      if(ov.type==='line') return {id, kind:'vector-line', x1:ov.x1, y1:ov.y1, x2:ov.x2, y2:ov.y2};
+      if(ov.type==='path') return {id, kind:'vector-path', points:ov.points.map(p=>[p[0],p[1]])};
+    }
+    return {id, kind:'unknown'};
+  });
+  let moved = false;
+  dragging = true;
+  const onMove = rafThrottle((clientX, clientY, shiftKey)=>{
+    const w = clientToWorld(clientX, clientY);
+    const dx = w.x - startWorld.x, dy = w.y - startWorld.y;
+    multiStart.forEach(s=>{
+      if(s.kind==='element'){
+        const oel = elements.find(x=>x.id===s.id);
+        if(!oel) return;
+        oel.x = snap(s.x + dx, shiftKey); oel.y = snap(s.y + dy, shiftKey); markDirty(oel.id);
+      } else if(s.kind==='vector-line'){
+        const v = vectors.find(x=>x.id===s.id);
+        if(!v) return;
+        v.x1 = snap(s.x1 + dx, shiftKey); v.y1 = snap(s.y1 + dy, shiftKey); v.x2 = snap(s.x2 + dx, shiftKey); v.y2 = snap(s.y2 + dy, shiftKey); markDirty(v.id);
+      } else if(s.kind==='vector-path'){
+        const v = vectors.find(x=>x.id===s.id);
+        if(!v) return;
+        v.points = s.points.map(p=>[snap(p[0]+dx, shiftKey), snap(p[1]+dy, shiftKey)]); markDirty(v.id);
+      }
+    });
+    if(groupOverlay) recomputeGroupBBox();
+    moved = true;
+  });
+  function handleMove(ev){ onMove(ev.clientX, ev.clientY, ev.shiftKey); }
+  function onUp(){
+    dragging = false;
+    window.removeEventListener('mousemove', handleMove);
+    window.removeEventListener('mouseup', onUp);
+    if(moved) commit();
+  }
+  window.addEventListener('mousemove', handleMove);
+  window.addEventListener('mouseup', onUp);
+}
+
+// resize + rotate handles (images & text)
+function addResizeHandles(wrap, el){
+  document.querySelectorAll('.obj .handle, .obj .rot-stem').forEach(h=>h.remove());
+  const corners = ['nw','ne','sw','se'];
+  corners.forEach(c=>{
+    const h = document.createElement('div');
+    h.className = 'handle '+c;
+    h.style.transform = `scale(${1/zoom})`;
+    h.style.transformOrigin = 'center center';
+    h.addEventListener('mousedown', (e)=> startResize(e, el, c, wrap));
+    wrap.appendChild(h);
+  });
+  const stem = document.createElement('div'); stem.className='rot-stem'; wrap.appendChild(stem);
+  const rot = document.createElement('div'); rot.className='handle rot';
+  rot.style.transform = `scale(${1/zoom})`; rot.style.transformOrigin='center center';
+  rot.addEventListener('mousedown', (e)=> startRotate(e, el, wrap));
+  wrap.appendChild(rot);
+}
+
+function startResize(e, el, corner, wrap){
+  if(e.button!==0) return;
+  e.stopPropagation(); e.preventDefault();
+  dragging = true;
+  const startWorld = clientToWorld(e.clientX, e.clientY);
+  const start = { x:el.x, y:el.y, w:wrap.offsetWidth, h:wrap.offsetHeight, fontSize:el.fontSize };
+  const aspect = start.w / (start.h || 1);
+
+  const onMove = rafThrottle((clientX, clientY)=>{
+    const w = clientToWorld(clientX, clientY);
+    let dx = w.x-startWorld.x, dy = w.y-startWorld.y;
+    let nx=start.x, ny=start.y, nw=start.w, nh=start.h;
+
+    function calcNh(newW){ return el.type==='image' ? newW/aspect : start.h*(newW/start.w); }
+
+    if(corner==='se'){ nw=start.w+dx; nh=calcNh(nw); }
+    else if(corner==='sw'){ nw=start.w-dx; nh=calcNh(nw); nx=start.x+(start.w-nw); }
+    else if(corner==='ne'){ nw=start.w+dx; nh=calcNh(nw); ny=start.y+(start.h-nh); }
+    else if(corner==='nw'){ nw=start.w-dx; nh=calcNh(nw); nx=start.x+(start.w-nw); ny=start.y+(start.h-nh); }
+
+    if(nw<20) nw=20;
+
+    if(el.type==='image'){
+      if(nh<12) nh=12;
+      el.w = snap(nw); el.h = snap(nh);
+    } else {
+      el.w = snap(nw);
+      el.fontSize = Math.max(6, Math.round(start.fontSize*(nw/start.w)));
+    }
+    el.x = snap(nx); el.y = snap(ny);
+    updateElementDOM(el);
+  });
+  function handleMove(ev){ onMove(ev.clientX, ev.clientY); }
+  function onUp(){
+    dragging = false;
+    window.removeEventListener('mousemove', handleMove);
+    window.removeEventListener('mouseup', onUp);
+    commit();
+    renderSubbar();
+  }
+  window.addEventListener('mousemove', handleMove);
+  window.addEventListener('mouseup', onUp);
+}
+
+function startRotate(e, el, wrap){
+  if(e.button!==0) return;
+  e.stopPropagation(); e.preventDefault();
+  dragging = true;
+  const rect = { w:wrap.offsetWidth, h:wrap.offsetHeight };
+  const cx = el.x + rect.w/2, cy = el.y + rect.h/2;
+  const onMove = rafThrottle((clientX, clientY, shiftKey)=>{
+    const w = clientToWorld(clientX, clientY);
+    let angle = Math.atan2(w.y-cy, w.x-cx)*180/Math.PI + 90;
+    if(shiftKey) angle = snapAngle(angle);
+    el.rot = Math.round(angle);
+    updateElementDOM(el);
+  });
+  function handleMove(ev){ onMove(ev.clientX, ev.clientY, ev.shiftKey); }
+  function onUp(){
+    dragging = false;
+    window.removeEventListener('mousemove', handleMove);
+    window.removeEventListener('mouseup', onUp);
+    commit();
+  }
+  window.addEventListener('mousemove', handleMove);
+  window.addEventListener('mouseup', onUp);
+}
+
+// ================= VECTOR DOM (lines & freehand paths, unified layer with elements) =================
+function vectorBounds(v){
+  const pad = v.width/2 + (v.type==='line' && v.arrow ? Math.max(10, v.width*2.5) : 4);
+  let minX,minY,maxX,maxY;
+  if(v.type==='line'){
+    minX=Math.min(v.x1,v.x2); maxX=Math.max(v.x1,v.x2);
+    minY=Math.min(v.y1,v.y2); maxY=Math.max(v.y1,v.y2);
+  } else {
+    minX=Infinity;minY=Infinity;maxX=-Infinity;maxY=-Infinity;
+    v.points.forEach(p=>{ minX=Math.min(minX,p[0]); maxX=Math.max(maxX,p[0]); minY=Math.min(minY,p[1]); maxY=Math.max(maxY,p[1]); });
+  }
+  return {minX:minX-pad, minY:minY-pad, maxX:maxX+pad, maxY:maxY+pad};
+}
+
+// Same as vectorBounds but without the stroke/arrow padding — the actual geometric
+// extent of the line/path, used as the anchor/center reference for its own resize and
+// rotate handles so they track the real shape rather than its (deliberately larger) hit area.
+function vectorTightBounds(v){
+  if(v.type==='line'){
+    return {minX:Math.min(v.x1,v.x2), minY:Math.min(v.y1,v.y2), maxX:Math.max(v.x1,v.x2), maxY:Math.max(v.y1,v.y2)};
+  }
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  v.points.forEach(p=>{ minX=Math.min(minX,p[0]); maxX=Math.max(maxX,p[0]); minY=Math.min(minY,p[1]); maxY=Math.max(maxY,p[1]); });
+  return {minX,minY,maxX,maxY};
+}
+
+function ensureVectorDOM(v){
+  let wrap = document.getElementById(v.id);
+  if(wrap) return wrap;
+  wrap = document.createElement('div');
+  wrap.id = v.id;
+  wrap.className = 'obj vec-obj';
+  const svgEl = document.createElementNS(SVGNS,'svg');
+  wrap.appendChild(svgEl);
+  elLayer.appendChild(wrap);
+  zOrder.push(v.id);
+
+  if(v.type==='line'){
+    const line = document.createElementNS(SVGNS,'line');
+    line.style.pointerEvents = 'stroke';
+    line.style.cursor = 'move';
+    line.addEventListener('mousedown', (e)=> handleVectorMouseDown(e, v));
+    svgEl.appendChild(line);
+  } else if(v.type==='path'){
+    const path = document.createElementNS(SVGNS,'path');
+    path.style.pointerEvents = 'stroke';
+    path.style.cursor = 'move';
+    svgEl.appendChild(path);
+    // make freehand paths selectable and draggable
+    path.addEventListener('mousedown', (e)=> handleVectorMouseDown(e, v));
+  }
+  return wrap;
+}
+
+function renderVector(v){
+  const wrap = ensureVectorDOM(v);
+  wrap.classList.toggle('locked', !!v.locked);
+  wrap.style.opacity = (v.opacity==null ? 1 : v.opacity);
+  const b = vectorBounds(v);
+  const w = Math.max(1, b.maxX-b.minX), h = Math.max(1, b.maxY-b.minY);
+  wrap.style.left = b.minX+'px';
+  wrap.style.top = b.minY+'px';
+  wrap.style.width = w+'px';
+  wrap.style.height = h+'px';
+  const svgEl = wrap.querySelector('svg');
+  svgEl.setAttribute('width', w);
+  svgEl.setAttribute('height', h);
+  svgEl.setAttribute('viewBox', `0 0 ${w} ${h}`);
+
+      if(v.type==='line'){
+        const line = wrap.querySelector('line');
+        const x1=v.x1-b.minX, y1=v.y1-b.minY, x2=v.x2-b.minX, y2=v.y2-b.minY;
+        line.setAttribute('x1',x1); line.setAttribute('y1',y1);
+        // compute arrow geometry and shorten visible line so arrow sits flush
+        let x2s=x2, y2s=y2;
+        let poly = wrap.querySelector('polygon.arrowhead');
+        if(v.arrow){
+          const meta = computeArrowPoints(x1,y1,x2,y2,v.width);
+          if(!poly){ poly=document.createElementNS(SVGNS,'polygon'); poly.setAttribute('class','arrowhead'); poly.style.pointerEvents='none'; svgEl.appendChild(poly); }
+          poly.setAttribute('points', meta.pts.map(p=>p.join(',')).join(' '));
+          poly.setAttribute('fill', v.color);
+          const shorten = Math.min(meta.base*0.75, meta.len*0.25);
+          x2s = x2 - shorten*Math.cos(meta.angle);
+          y2s = y2 - shorten*Math.sin(meta.angle);
+        } else if(poly){ poly.remove(); }
+        line.setAttribute('x2',x2s); line.setAttribute('y2',y2s);
+        line.setAttribute('stroke', v.color);
+        line.setAttribute('stroke-width', v.width);
+        line.setAttribute('stroke-linecap','round');
+  } else if(v.type==='path'){
+    const path = wrap.querySelector('path');
+    const d = v.points.map((p,i)=> (i===0?'M':'L')+(p[0]-b.minX)+','+(p[1]-b.minY)).join(' ');
+    path.setAttribute('d', d);
+    path.setAttribute('stroke', v.color);
+    path.setAttribute('stroke-width', v.width);
+    path.setAttribute('fill','none');
+    path.setAttribute('stroke-linecap','round');
+    path.setAttribute('stroke-linejoin','round');
+  }
+  if(selectedId===v.id){ updateLineHandlePositions(v); positionVectorHandles(v); }
+}
+
+// unified entry point for clicking a line or path: keeps shift-click and group-drag
+// behavior identical to images/text (see attachDragMove)
+function handleVectorMouseDown(e, v){
+  if(e.button!==0) return;
+  if(tool!=='select') return;
+  e.stopPropagation();
+  if(e.shiftKey){
+    if(selectedIds.includes(v.id)) removeFromSelection(v.id); else addToSelection(v.id,'vector');
+    return;
+  }
+  // if this vector is part of the current multi-selection, drag the whole group
+  if(selectedIds.length>1 && selectedIds.includes(v.id)){
+    startMultiDrag(e, selectedIds);
+    return;
+  }
+  select(v.id,'vector');
+  if(v.locked) return;
+  if(v.type==='line') dragLine(e, v); else startPathDrag(e, v);
+}
+
+function dragLine(e, v){
+  dragging = true;
+  const startWorld = clientToWorld(e.clientX, e.clientY);
+  const s = {x1:v.x1,y1:v.y1,x2:v.x2,y2:v.y2};
+  const onMove = rafThrottle((clientX, clientY, shiftKey)=>{
+    const w = clientToWorld(clientX, clientY);
+    const dx=w.x-startWorld.x, dy=w.y-startWorld.y;
+    v.x1=snap(s.x1+dx, shiftKey); v.y1=snap(s.y1+dy, shiftKey); v.x2=snap(s.x2+dx, shiftKey); v.y2=snap(s.y2+dy, shiftKey);
+    markDirty(v.id);
+  });
+  function handleMove(ev){ onMove(ev.clientX, ev.clientY, ev.shiftKey); }
+  function onUp(){
+    dragging = false;
+    window.removeEventListener('mousemove', handleMove);
+    window.removeEventListener('mouseup', onUp);
+    commit();
+  }
+  window.addEventListener('mousemove', handleMove);
+  window.addEventListener('mouseup', onUp);
+}
+
+function startPathDrag(e, v){
+  dragging = true;
+  const startWorld = clientToWorld(e.clientX, e.clientY);
+  const origPoints = v.points.map(p=>[p[0],p[1]]);
+  const onMove = rafThrottle((clientX, clientY, shiftKey)=>{
+    const w = clientToWorld(clientX, clientY);
+    const dx = w.x - startWorld.x, dy = w.y - startWorld.y;
+    v.points = origPoints.map(p=>[snap(p[0]+dx, shiftKey), snap(p[1]+dy, shiftKey)]);
+    markDirty(v.id);
+  });
+  function handleMove(ev){ onMove(ev.clientX, ev.clientY, ev.shiftKey); }
+  function onUp(){
+    dragging = false;
+    window.removeEventListener('mousemove', handleMove);
+    window.removeEventListener('mouseup', onUp);
+    commit();
+  }
+  window.addEventListener('mousemove', handleMove);
+  window.addEventListener('mouseup', onUp);
+}
+
+function addLineHandles(v){
+  document.querySelectorAll('.line-handle').forEach(h=>h.remove());
+  ['1','2'].forEach(n=>{
+    const h = document.createElement('div');
+    h.className='line-handle';
+    h.dataset.endpoint = n;
+    elLayer.appendChild(h);
+    positionLineHandle(h, v, n);
+    h.addEventListener('mousedown', (e)=>{
+      // only left-button should start handle drag
+      if(e.button!==0) return;
+      e.stopPropagation();
+      dragging = true;
+      const onMove = rafThrottle((clientX, clientY)=>{
+        const w = clientToWorld(clientX, clientY);
+        v['x'+n] = snap(w.x); v['y'+n] = snap(w.y);
+        renderVector(v);
+        positionLineHandle(h, v, n);
+      });
+      function handleMove(ev){ onMove(ev.clientX, ev.clientY); }
+      function onUp(){
+        dragging = false;
+        window.removeEventListener('mousemove', handleMove);
+        window.removeEventListener('mouseup', onUp);
+        commit();
+      }
+      window.addEventListener('mousemove', handleMove);
+      window.addEventListener('mouseup', onUp);
+    });
+  });
+}
+function positionLineHandle(h, v, n){
+  h.style.left = v['x'+n]+'px';
+  h.style.top = v['y'+n]+'px';
+}
+function updateLineHandlePositions(v){
+  document.querySelectorAll('.line-handle').forEach(h=> positionLineHandle(h, v, h.dataset.endpoint));
+}
+
+// ---------------- vector (line/path) resize + rotate handles ----------------
+// Gives freehand paths and lines the same corner-scale + rotate-handle interaction
+// that images/text already have, instead of paths having no individual transform
+// controls and lines only having endpoint-drag handles.
+let vectorHandleEls = [];
+function clearVectorHandles(){ vectorHandleEls.forEach(h=>h.remove()); vectorHandleEls = []; }
+
+function addVectorHandles(v){
+  clearVectorHandles();
+  ['nw','ne','sw','se'].forEach(c=>{
+    const h = document.createElement('div');
+    h.className = 'handle '+c;
+    h.style.transform = `scale(${1/zoom})`; h.style.transformOrigin = 'center center';
+    h.addEventListener('mousedown', (e)=> startVectorResize(e, v, c));
+    elLayer.appendChild(h);
+    vectorHandleEls.push(h);
+  });
+  const stem = document.createElement('div'); stem.className = 'rot-stem';
+  elLayer.appendChild(stem); vectorHandleEls.push(stem);
+  const rot = document.createElement('div'); rot.className = 'handle rot';
+  rot.style.marginLeft = '0'; // the .handle.rot class uses a left:50%+margin-left:-6px centering trick we don't use here
+  rot.style.transform = `scale(${1/zoom})`; rot.style.transformOrigin = 'center center';
+  rot.addEventListener('mousedown', (e)=> startVectorRotate(e, v));
+  elLayer.appendChild(rot); vectorHandleEls.push(rot);
+  positionVectorHandles(v);
+}
+
+function positionVectorHandles(v){
+  if(!vectorHandleEls.length) return;
+  const b = vectorTightBounds(v);
+  const corners = { nw:{x:b.minX,y:b.minY}, ne:{x:b.maxX,y:b.minY}, sw:{x:b.minX,y:b.maxY}, se:{x:b.maxX,y:b.maxY} };
+  const midX = (b.minX+b.maxX)/2;
+  vectorHandleEls.forEach(h=>{
+    if(h.classList.contains('rot-stem')){
+      h.style.left = midX+'px'; h.style.top = (b.minY-20)+'px';
+    } else if(h.classList.contains('rot')){
+      h.style.left = (midX-5)+'px'; h.style.top = (b.minY-33)+'px';
+    } else {
+      const c = ['nw','ne','sw','se'].find(cls=>h.classList.contains(cls));
+      if(!c) return;
+      const p = corners[c];
+      h.style.left = (p.x-5)+'px'; h.style.top = (p.y-5)+'px';
+    }
+  });
+}
+
+function startVectorResize(e, v, corner){
+  if(e.button!==0) return;
+  e.stopPropagation(); e.preventDefault();
+  dragging = true;
+  const b = vectorTightBounds(v);
+  const corners = { nw:{x:b.minX,y:b.minY}, ne:{x:b.maxX,y:b.minY}, sw:{x:b.minX,y:b.maxY}, se:{x:b.maxX,y:b.maxY} };
+  const opposite = { nw:'se', ne:'sw', sw:'ne', se:'nw' };
+  const anchor = corners[opposite[corner]];
+  const startCorner = corners[corner];
+  const startDist = Math.hypot(startCorner.x-anchor.x, startCorner.y-anchor.y) || 1;
+  const orig = v.type==='line' ? {x1:v.x1,y1:v.y1,x2:v.x2,y2:v.y2} : {points:v.points.map(p=>[p[0],p[1]])};
+  const onMove = rafThrottle((clientX, clientY)=>{
+    const w = clientToWorld(clientX, clientY);
+    const dist = Math.hypot(w.x-anchor.x, w.y-anchor.y);
+    const s = Math.max(0.05, Math.min(20, dist/startDist));
+    if(v.type==='line'){
+      v.x1 = snap(anchor.x + (orig.x1-anchor.x)*s); v.y1 = snap(anchor.y + (orig.y1-anchor.y)*s);
+      v.x2 = snap(anchor.x + (orig.x2-anchor.x)*s); v.y2 = snap(anchor.y + (orig.y2-anchor.y)*s);
+    } else {
+      v.points = orig.points.map(p=>[snap(anchor.x+(p[0]-anchor.x)*s), snap(anchor.y+(p[1]-anchor.y)*s)]);
+    }
+    renderVector(v);
+    positionVectorHandles(v);
+  });
+  function handleMove(ev){ onMove(ev.clientX, ev.clientY); }
+  function onUp(){
+    dragging = false;
+    window.removeEventListener('mousemove', handleMove);
+    window.removeEventListener('mouseup', onUp);
+    commit();
+  }
+  window.addEventListener('mousemove', handleMove);
+  window.addEventListener('mouseup', onUp);
+}
+
+function startVectorRotate(e, v){
+  if(e.button!==0) return;
+  e.stopPropagation(); e.preventDefault();
+  dragging = true;
+  const b = vectorTightBounds(v);
+  const cx = (b.minX+b.maxX)/2, cy = (b.minY+b.maxY)/2;
+  const startWorld = clientToWorld(e.clientX, e.clientY);
+  const startAngle = Math.atan2(startWorld.y-cy, startWorld.x-cx);
+  const orig = v.type==='line' ? {x1:v.x1,y1:v.y1,x2:v.x2,y2:v.y2} : {points:v.points.map(p=>[p[0],p[1]])};
+  const onMove = rafThrottle((clientX, clientY, shiftKey)=>{
+    const w = clientToWorld(clientX, clientY);
+    const ang = Math.atan2(w.y-cy, w.x-cx);
+    let deltaDeg = (ang - startAngle) * 180/Math.PI;
+    if(shiftKey) deltaDeg = snapAngle(deltaDeg);
+    const delta = deltaDeg * Math.PI/180;
+    const cos = Math.cos(delta), sin = Math.sin(delta);
+    function rot(px,py){ const dx=px-cx, dy=py-cy; return [snap(cx+dx*cos-dy*sin), snap(cy+dx*sin+dy*cos)]; }
+    if(v.type==='line'){
+      const p1 = rot(orig.x1,orig.y1), p2 = rot(orig.x2,orig.y2);
+      v.x1=p1[0]; v.y1=p1[1]; v.x2=p2[0]; v.y2=p2[1];
+    } else {
+      v.points = orig.points.map(p=> rot(p[0],p[1]));
+    }
+    renderVector(v);
+    positionVectorHandles(v);
+  });
+  function handleMove(ev){ onMove(ev.clientX, ev.clientY, ev.shiftKey); }
+  function onUp(){
+    dragging = false;
+    window.removeEventListener('mousemove', handleMove);
+    window.removeEventListener('mouseup', onUp);
+    commit();
+  }
+  window.addEventListener('mousemove', handleMove);
+  window.addEventListener('mouseup', onUp);
+}
+
+
+// ================= LINE / ARROW TOOL =================
+function startLineDraw(startPos){
+  const v = { id:newId(), type:'line', x1:startPos.x, y1:startPos.y, x2:startPos.x, y2:startPos.y,
+    color:lineSettings.color, width:lineSettings.width, arrow:lineSettings.arrow };
+  vectors.push(v);
+  renderVector(v);
+  const onMove = rafThrottle((clientX, clientY)=>{
+    const w = clientToWorld(clientX, clientY);
+    v.x2 = w.x; v.y2 = w.y;
+    markDirty(v.id);
+  });
+  function handleMove(ev){ onMove(ev.clientX, ev.clientY); }
+  function onUp(){
+    window.removeEventListener('mousemove', handleMove);
+    window.removeEventListener('mouseup', onUp);
+    commit();
+    // stay on the line tool so multiple arrows can be drawn in a row
+  }
+  window.addEventListener('mousemove', handleMove);
+  window.addEventListener('mouseup', onUp);
+}
+
+// ================= FREEHAND DRAW =================
+function startFreeDraw(startPos){
+  const v = { id:newId(), type:'path', points:[[startPos.x,startPos.y]], color:drawSettings.color, width:drawSettings.size };
+  vectors.push(v);
+  renderVector(v);
+  const onMove = rafThrottle((clientX, clientY)=>{
+    const w = clientToWorld(clientX, clientY);
+    v.points.push([w.x,w.y]);
+    markDirty(v.id);
+  });
+  function handleMove(ev){ onMove(ev.clientX, ev.clientY); }
+  function onUp(){
+    window.removeEventListener('mousemove', handleMove);
+    window.removeEventListener('mouseup', onUp);
+    commit();
+  }
+  window.addEventListener('mousemove', handleMove);
+  window.addEventListener('mouseup', onUp);
+}
+
+// ================= CLIPBOARD PASTE =================
+// Single source of truth for Ctrl+V: OS/browser image (e.g. copied from a web page) takes
+// priority, then our own in-app clipboard (from Ctrl+C on a selection), then plain OS text.
+window.addEventListener('paste', (e)=>{
+  // let native paste behave normally inside editable fields (e.g. editing a text object)
+  const ae = document.activeElement;
+  if(ae && (ae.isContentEditable || ae.tagName==='INPUT' || ae.tagName==='TEXTAREA')) return;
+
+  const items = (e.clipboardData && e.clipboardData.items) || [];
+  for(const item of items){
+    if(item.type.indexOf('image')===0){
+      e.preventDefault();
+      const file = item.getAsFile();
+      const reader = new FileReader();
+      reader.onload = ()=>{
+        const img = new Image();
+        img.onload = ()=>{
+          const cursorClient = (lastPointerClient && lastPointerClient.x!=null) ? lastPointerClient : { x: window.innerWidth/2, y: window.innerHeight/2 };
+          const center = clientToWorld(cursorClient.x, cursorClient.y);
+          addImageElement(reader.result, img.naturalWidth, img.naturalHeight, center.x, center.y);
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+      return;
+    }
+  }
+
+  // no OS-level image found — prefer our own most-recently-copied board items over
+  // whatever stray text might be sitting in the OS clipboard from something else
+  if((clipboard.elements && clipboard.elements.length) || (clipboard.vectors && clipboard.vectors.length)){
+    e.preventDefault();
+    pasteClipboard();
+    return;
+  }
+
+  const text = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+  if(text){
+    e.preventDefault();
+    const cursorClient = (lastPointerClient && lastPointerClient.x!=null) ? lastPointerClient : { x: window.innerWidth/2, y: window.innerHeight/2 };
+    const center = clientToWorld(cursorClient.x, cursorClient.y);
+    const el = { id:newId(), type:'text', x:snap(center.x), y:snap(center.y), w:null, rot:0,
+      text:text, color:textDefaults.color, fontSize:textDefaults.size, bold:false, underline:false };
+    elements.push(el);
+    updateElementDOM(el);
+    select(el.id,'element');
+    commit();
+  }
+});
+
+function copySelected(){
+  clipboard = { elements: [], vectors: [] };
+  const ids = selectedIds.length? selectedIds.slice() : (selectedId? [selectedId]:[]);
+  ids.forEach(id=>{
+    const el = elements.find(x=>x.id===id);
+    if(el) clipboard.elements.push(JSON.parse(JSON.stringify(el)));
+    const v = vectors.find(x=>x.id===id);
+    if(v) clipboard.vectors.push(JSON.parse(JSON.stringify(v)));
+  });
+}
+function pasteClipboard(){
+  if((clipboard.elements && clipboard.elements.length) || (clipboard.vectors && clipboard.vectors.length)){
+    const newIds = [];
+    // compute clipboard center
+    let cMinX=Infinity,cMinY=Infinity,cMaxX=-Infinity,cMaxY=-Infinity;
+    clipboard.elements.forEach(item=>{ const ew = item.w||nodeWidthFallback(item); const eh = item.h||(item.fontSize||28)*1.4; cMinX = Math.min(cMinX, item.x); cMinY = Math.min(cMinY, item.y); cMaxX = Math.max(cMaxX, item.x+ew); cMaxY = Math.max(cMaxY, item.y+eh); });
+    clipboard.vectors.forEach(item=>{ if(item.type==='line'){ cMinX=Math.min(cMinX,item.x1,item.x2); cMinY=Math.min(cMinY,item.y1,item.y2); cMaxX=Math.max(cMaxX,item.x1,item.x2); cMaxY=Math.max(cMaxY,item.y1,item.y2); } else if(item.type==='path'){ item.points.forEach(p=>{ cMinX=Math.min(cMinX,p[0]); cMinY=Math.min(cMinY,p[1]); cMaxX=Math.max(cMaxX,p[0]); cMaxY=Math.max(cMaxY,p[1]); }) } });
+    if(!isFinite(cMinX)){ cMinX=0; cMinY=0; cMaxX=0; cMaxY=0; }
+    const clipboardCenter = { x:(cMinX+cMaxX)/2, y:(cMinY+cMaxY)/2 };
+    const cursor = (lastPointerClient && lastPointerClient.x!=null) ? clientToWorld(lastPointerClient.x, lastPointerClient.y) : clientToWorld(window.innerWidth/2, window.innerHeight/2);
+    const dx = cursor.x - clipboardCenter.x, dy = cursor.y - clipboardCenter.y;
+    // paste elements
+    clipboard.elements.forEach(item=>{
+      const copy = JSON.parse(JSON.stringify(item));
+      copy.id = newId();
+      copy.x = snap((copy.x||0) + dx);
+      copy.y = snap((copy.y||0) + dy);
+      elements.push(copy);
+      updateElementDOM(copy);
+      newIds.push(copy.id);
+    });
+    clipboard.vectors.forEach(item=>{
+      const copy = JSON.parse(JSON.stringify(item));
+      copy.id = newId();
+      if(copy.type==='line'){ copy.x1 = snap(copy.x1+dx); copy.y1 = snap(copy.y1+dy); copy.x2 = snap(copy.x2+dx); copy.y2 = snap(copy.y2+dy); }
+      else if(copy.type==='path'){ copy.points = copy.points.map(p=>[snap(p[0]+dx), snap(p[1]+dy)]); }
+      vectors.push(copy);
+      renderVector(copy);
+      newIds.push(copy.id);
+    });
+    applyZOrder();
+    if(newIds.length) select(newIds[0], elements.find(e=>e.id===newIds[0])? 'element':'vector');
+    commit();
+  }
+}
+
+// ================= UNDO / REDO =================
+let history = [];
+let historyIndex = -1;
+let isRestoring = false;
+const HISTORY_LIMIT = 100;
+
+function snapshotState(){
+  return JSON.stringify({ elements, vectors, zOrder });
+}
+function commit(){
+  if(isRestoring) return;
+  const snap = snapshotState();
+  if(historyIndex>=0 && history[historyIndex]===snap) return;
+  history = history.slice(0, historyIndex+1);
+  history.push(snap);
+  if(history.length>HISTORY_LIMIT) history.shift();
+  historyIndex = history.length-1;
+  updateUndoRedoButtons();
+  // autosave after each commit
+  trySaveAutosave();
+}
+function restoreState(snap){
+  isRestoring = true;
+  const data = JSON.parse(snap);
+  elLayer.innerHTML = '';
+  elements = data.elements;
+  vectors = data.vectors;
+  zOrder = data.zOrder || elements.map(e=>e.id).concat(vectors.map(v=>v.id));
+  elements.forEach(updateElementDOM);
+  vectors.forEach(renderVector);
+  applyZOrder();
+  deselect();
+  isRestoring = false;
+}
+function undo(){
+  if(historyIndex<=0) return;
+  historyIndex--;
+  restoreState(history[historyIndex]);
+  updateUndoRedoButtons();
+}
+function redo(){
+  if(historyIndex>=history.length-1) return;
+  historyIndex++;
+  restoreState(history[historyIndex]);
+  updateUndoRedoButtons();
+}
+function updateUndoRedoButtons(){
+  document.getElementById('btnUndo').classList.toggle('disabled', historyIndex<=0);
+  document.getElementById('btnRedo').classList.toggle('disabled', historyIndex>=history.length-1);
+}
+document.getElementById('btnUndo').addEventListener('click', undo);
+document.getElementById('btnRedo').addEventListener('click', redo);
+function resetHistory(){
+  history = [snapshotState()];
+  historyIndex = 0;
+  updateUndoRedoButtons();
+}
+
+// ================= SAVE / LOAD PROJECT =================
+document.getElementById('btnSaveProject').addEventListener('click', ()=>{
+  const data = { elements, vectors, zOrder, pan, zoom, idCounter };
+  const blob = new Blob([JSON.stringify(data)], {type:'application/json'});
+  downloadBlob(blob, 'board-project.json');
+});
+document.getElementById('btnLoadProject').addEventListener('click', ()=> document.getElementById('projectInput').click());
+document.getElementById('projectInput').addEventListener('change', (e)=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = ()=>{
+    try{
+      const data = JSON.parse(reader.result);
+      loadProject(data);
+    }catch(err){ alert('Could not load project: '+err.message); }
+  };
+  reader.readAsText(file);
+  e.target.value='';
+});
+function loadProject(data){
+  elLayer.innerHTML='';
+  elements = data.elements || [];
+  vectors = data.vectors || [];
+  zOrder = data.zOrder || elements.map(e=>e.id).concat(vectors.map(v=>v.id));
+  pan = data.pan || {x:0,y:0};
+  zoom = data.zoom || 1;
+  idCounter = data.idCounter || (elements.length+vectors.length+1);
+  applyTransform();
+  elements.forEach(updateElementDOM);
+  vectors.forEach(renderVector);
+  applyZOrder();
+  deselect();
+  resetHistory();
+}
+
+function downloadBlob(blob, filename){
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+// ---------------- autosave ----------------
+function trySaveAutosave(){
+  try{
+    const data = { elements, vectors, zOrder, pan, zoom, idCounter };
+    localStorage.setItem('board3_autosave', JSON.stringify(data));
+  }catch(e){ /* ignore */ }
+}
+function tryLoadAutosave(){
+  try{
+    const s = localStorage.getItem('board3_autosave');
+    if(s){ const data = JSON.parse(s); loadProject(data); }
+  }catch(e){ console.warn('autosave load failed', e); }
+}
+window.addEventListener('beforeunload', trySaveAutosave);
+
+// ================= EXPORT PREVIEW HTML =================
+document.getElementById('btnExportPreview').addEventListener('click', ()=>{
+  // populate modal controls from current settings
+  const q = document.getElementById('exportQuality'); const qm = document.getElementById('exportQualityVal'); const md = document.getElementById('exportMaxDim');
+  if(q){ q.value = exportSettings.quality; if(qm) qm.textContent = Math.round(exportSettings.quality*100)+'%'; }
+  if(md) md.value = exportSettings.maxImageDim;
+  document.getElementById('exportModalBg').classList.add('show');
+});
+document.getElementById('exportCancel').addEventListener('click', ()=>{
+  document.getElementById('exportModalBg').classList.remove('show');
+});
+const exportQualityInput = document.getElementById('exportQuality');
+if(exportQualityInput){ exportQualityInput.addEventListener('input', (e)=>{ const v = Math.round(parseFloat(e.target.value)*100); document.getElementById('exportQualityVal').textContent = v + '%'; }); }
+document.getElementById('exportConfirm').addEventListener('click', async ()=>{
+  exportSettings.quality = parseFloat(document.getElementById('exportQuality').value) || exportSettings.quality;
+  exportSettings.maxImageDim = parseInt(document.getElementById('exportMaxDim').value) || exportSettings.maxImageDim;
+  document.getElementById('exportModalBg').classList.remove('show');
+  await buildPreviewExport();
+});
+document.getElementById('exportEmbedCopy').addEventListener('click', async (e)=>{
+  exportSettings.quality = parseFloat(document.getElementById('exportQuality').value) || exportSettings.quality;
+  exportSettings.maxImageDim = parseInt(document.getElementById('exportMaxDim').value) || exportSettings.maxImageDim;
+  const btn = e.currentTarget;
+  const original = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Building\u2026';
+  const copied = await copyEmbedCode();
+  btn.textContent = copied ? 'Copied!' : 'Downloaded (clipboard unavailable)';
+  setTimeout(()=>{ btn.textContent = original; btn.disabled = false; }, 1800);
+});
+
+// helper: compress an image dataURL or URL to JPEG with max dimension constraints
+function compressImageSrc(src, maxDim, quality){
+  return new Promise((resolve,reject)=>{
+    // if source is an animated GIF (or GIF file), don't attempt to rasterize/convert it here — preserve original
+    try{
+      const low = (src||'').toLowerCase();
+      if(low.indexOf('data:image/gif')===0 || low.match(/\.gif(\?|$)/)){
+        return resolve(src);
+      }
+    }catch(_){}
+    try{
+      const img = new Image();
+      img.onload = ()=>{
+        try{
+          let w = img.naturalWidth, h = img.naturalHeight;
+          if(maxDim && Math.max(w,h) > maxDim){ const s = maxDim / Math.max(w,h); w = Math.round(w*s); h = Math.round(h*s); }
+          const cnv = document.createElement('canvas'); cnv.width = w; cnv.height = h;
+          const ctx = cnv.getContext('2d'); ctx.drawImage(img, 0, 0, w, h);
+          try{
+            // If user requested lossy compression (quality < 1), prefer WebP (keeps alpha when available)
+            if(quality && quality < 0.999){
+              try{
+                const webp = cnv.toDataURL('image/webp', quality);
+                // basic sanity: returned string starts with data:image
+                if(webp && webp.indexOf('data:')===0) return resolve(webp);
+              }catch(e){ /* fallthrough */ }
+              try{ const jpg = cnv.toDataURL('image/jpeg', quality); if(jpg && jpg.indexOf('data:')===0) return resolve(jpg); }catch(e){ /* fallthrough */ }
+              // if both fail, fall back to PNG below
+            }
+            // preserve alpha / original format when possible: return PNG (lossless)
+            try{ const out = cnv.toDataURL('image/png'); return resolve(out); }catch(e){ const any = cnv.toDataURL(); return resolve(any); }
+          }catch(e){ try{ resolve(cnv.toDataURL()); }catch(err){ reject(err); } }
+        }catch(err){ reject(err); }
+      };
+      img.onerror = ()=> reject(new Error('image load error'));
+      img.src = src;
+    }catch(err){ reject(err); }
+  });
+}
+
+document.getElementById('btnFit').addEventListener('click', fitToContent);
+document.getElementById('btnExportPNG').addEventListener('click', ()=> buildExportPNG());
+
+function fitToContent(){
+  const b = computeBounds();
+  const w = b.maxX-b.minX || 800, h=b.maxY-b.minY || 600;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  zoom = Math.min(vw/(w+120), vh/(h+120), 1.5);
+  if(!isFinite(zoom) || zoom<=0) zoom=1;
+  pan.x = vw/2 - (b.minX+w/2)*zoom;
+  pan.y = vh/2 - (b.minY+h/2)*zoom;
+  applyTransform();
+}
+
+async function buildExportPNG(){
+  // build a standalone SVG snapshot of the board, compressing images first
+  const b = computeBounds();
+  const width = Math.max(800, Math.ceil(b.maxX-b.minX));
+  const height = Math.max(600, Math.ceil(b.maxY-b.minY));
+  const parts = [];
+  // background
+  parts.push(`<rect x="0" y="0" width="${width}" height="${height}" fill="#1b1d22"/>`);
+  // compress images used in elements according to exportSettings
+  const imgPromises = elements.filter(e=>e.type==='image').map(e=> compressImageSrc(e.src, exportSettings.maxImageDim, exportSettings.quality).then(d=>({id:e.id, src:d})).catch(()=>({id:e.id, src:e.src})));
+  const compressed = await Promise.all(imgPromises);
+  const compMap = {};
+  compressed.forEach(o=> compMap[o.id]=o.src);
+  // draw elements in zOrder
+  zOrder.forEach(id=>{
+    const e = elements.find(x=>x.id===id);
+    const v = vectors.find(x=>x.id===id);
+    if(e){
+      if(e.type==='image'){
+        const src = compMap[e.id] || e.src;
+        parts.push(`<image x="${Math.round(e.x-b.minX)}" y="${Math.round(e.y-b.minY)}" width="${Math.round(e.w)}" height="${Math.round(e.h)}" href="${src}" />`);
+      } else if(e.type==='text'){
+        const txt = escapeXml(e.text||'');
+        const style = `font-size:${e.fontSize}px;fill:${e.color};font-weight:${e.bold?700:400};`;
+        parts.push(`<text x="${Math.round(e.x-b.minX+4)}" y="${Math.round(e.y-b.minY+e.fontSize)}" style="${style}">${txt}</text>`);
+      }
+    } else if(v){
+      if(v.type==='line'){
+          const x1=v.x1-b.minX, y1=v.y1-b.minY, x2=v.x2-b.minX, y2=v.y2-b.minY;
+          if(v.arrow){
+            const meta = computeArrowPoints(x1,y1,x2,y2,v.width);
+            const shorten = Math.min(meta.base*0.75, meta.len*0.25);
+            const x2s = x2 - shorten*Math.cos(meta.angle);
+            const y2s = y2 - shorten*Math.sin(meta.angle);
+            parts.push(`<line x1="${x1}" y1="${y1}" x2="${x2s}" y2="${y2s}" stroke="${v.color}" stroke-width="${v.width}" stroke-linecap="round"/>`);
+            parts.push(`<polygon points="${meta.pts.map(p=>p.join(',')).join(' ')}" fill="${v.color}"/>`);
+          } else {
+            parts.push(`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${v.color}" stroke-width="${v.width}" stroke-linecap="round"/>`);
+          }
+      } else if(v.type==='path'){
+        const d = v.points.map((p,i)=> (i===0?'M':'L')+(p[0]-b.minX)+','+(p[1]-b.minY)).join(' ');
+        parts.push(`<path d="${d}" fill="none" stroke="${v.color}" stroke-width="${v.width}" stroke-linecap="round" stroke-linejoin="round"/>`);
+      }
+    }
+  });
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">`+parts.join('')+`</svg>`;
+  const img = new Image();
+  const svgBlob = new Blob([svg], {type:'image/svg+xml;charset=utf-8'});
+  const url = URL.createObjectURL(svgBlob);
+  img.onload = ()=>{
+    const cnv = document.createElement('canvas'); cnv.width=width; cnv.height=height;
+    const ctx = cnv.getContext('2d'); ctx.fillStyle='#1b1d22'; ctx.fillRect(0,0,width,height);
+    ctx.drawImage(img,0,0);
+    cnv.toBlob(b=>{ downloadBlob(b, 'board-export.png'); URL.revokeObjectURL(url); }, 'image/png');
+  };
+  img.src = url;
+}
+
+function escapeXml(s){ return (s||'').replace(/[&<>\"]/g, c=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]); }
+
+function computeArrowPoints(x1,y1,x2,y2,width){
+  const angle = Math.atan2(y2-y1, x2-x1);
+  const len = Math.hypot(x2-x1, y2-y1);
+  const base = Math.max(14, width*3.0, Math.min(48, len*0.12));
+  const spread = 0.6;
+  const bx = x2 - base*Math.cos(angle-spread), by = y2 - base*Math.sin(angle-spread);
+  const cx = x2 - base*Math.cos(angle+spread), cy = y2 - base*Math.sin(angle+spread);
+  return { pts:[[x2,y2],[bx,by],[cx,cy]], base, angle, len };
+}
+
+function computeBounds(){
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  elements.forEach(el=>{
+    const w = el.w || 200, h = el.h || (el.fontSize||28)*1.4;
+    minX=Math.min(minX, el.x); minY=Math.min(minY, el.y);
+    maxX=Math.max(maxX, el.x+w); maxY=Math.max(maxY, el.y+h);
+  });
+  vectors.forEach(v=>{
+    if(v.type==='line'){
+      minX=Math.min(minX,v.x1,v.x2); maxX=Math.max(maxX,v.x1,v.x2);
+      minY=Math.min(minY,v.y1,v.y2); maxY=Math.max(maxY,v.y1,v.y2);
+    } else if(v.type==='path'){
+      v.points.forEach(p=>{ minX=Math.min(minX,p[0]); maxX=Math.max(maxX,p[0]); minY=Math.min(minY,p[1]); maxY=Math.max(maxY,p[1]); });
+    }
+  });
+  if(!isFinite(minX)) return {minX:0,minY:0,maxX:800,maxY:600};
+  return {minX,minY,maxX,maxY};
+}
+
+async function buildPreviewHTML(){
+  const fit = document.getElementById('startFit').checked;
+  const bounds = computeBounds();
+
+  const elementsById = {};
+  const compressPromises = [];
+  elements.forEach(el=>{
+    const copy = JSON.parse(JSON.stringify(el));
+    elementsById[copy.id]=copy;
+    if(copy.type==='image'){
+      compressPromises.push(compressImageSrc(copy.src, exportSettings.maxImageDim, exportSettings.quality).then(d=>{ copy.src = d; }).catch(()=>{}));
+    }
+  });
+  const vectorsById = {}; vectors.forEach(v=> vectorsById[v.id]=JSON.parse(JSON.stringify(v)));
+  await Promise.all(compressPromises);
+
+  const dataPayload = {
+    elementsById: elementsById,
+    vectorsById: vectorsById,
+    zOrder: zOrder.slice(),
+    bounds
+  };
+  const json = JSON.stringify(dataPayload).replace(/<\/script/g, '<\\/script');
+
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Board Preview</title>
+<style>
+  html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#1b1d22;}
+  /* use same editor font stack to preserve appearance */
+  body, .txt { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  #vp{position:fixed;inset:0;overflow:hidden;cursor:grab;
+    background-image:radial-gradient(circle,#2a2d33 1px, transparent 1px);background-size:28px 28px;}
+  /* ensure child elements don't block panning in the read-only preview */
+  #vp *{pointer-events:none}
+  #vp.panning{cursor:grabbing;}
+  #wd{position:absolute;left:0;top:0;transform-origin:0 0;}
+  .obj{position:absolute;}
+  .obj img{display:block;width:100%;height:100%;object-fit:fill;border-radius:2px;pointer-events:none;}
+  .txt{padding:2px 4px;line-height:1.25;}
+  .vec svg{position:absolute;left:0;top:0;overflow:visible;}
+  #zi{position:fixed;bottom:10px;left:10px;background:rgba(37,40,46,.85);color:#e7e9ec;font:12px sans-serif;
+    padding:5px 9px;border-radius:6px;z-index:5;}
+</style></head>
+<body>
+<div id="vp">
+  <div id="wd">
+    <div id="el"></div>
+  </div>
+</div>
+<button id="btnFitPrev" style="position:fixed;top:10px;right:10px;z-index:6;padding:6px 10px;border-radius:6px;background:rgba(37,40,46,.85);color:#e7e9ec;border:none;">Fit</button>
+<div id="zi">100%</div>
+<script>
+const DATA = ${json};
+const vp=document.getElementById('vp'), wd=document.getElementById('wd'), el=document.getElementById('el'), zi=document.getElementById('zi');
+const SVGNS='http://www.w3.org/2000/svg';
+let pan={x:0,y:0}, zoom=1;
+function computeArrowPoints(x1,y1,x2,y2,width){
+  const angle=Math.atan2(y2-y1,x2-x1);
+  const len=Math.hypot(x2-x1,y2-y1);
+  const base=Math.max(8, width*2.2, Math.min(24, len*0.08));
+  const spread=0.45;
+  const bx=x2-base*Math.cos(angle-spread), by=y2-base*Math.sin(angle-spread);
+  const cx=x2-base*Math.cos(angle+spread), cy=y2-base*Math.sin(angle+spread);
+  return {pts:[[x2,y2],[bx,by],[cx,cy]], base, angle, len};
+}
+function apply(){ wd.style.transform='translate('+pan.x+'px,'+pan.y+'px) scale('+zoom+')'; zi.textContent=Math.round(zoom*100)+'%'; }
+
+function vecBounds(v){
+  const pad = v.width/2 + (v.type==='line' && v.arrow ? Math.max(10, v.width*2.5) : 4);
+  let minX,minY,maxX,maxY;
+  if(v.type==='line'){
+    minX=Math.min(v.x1,v.x2); maxX=Math.max(v.x1,v.x2);
+    minY=Math.min(v.y1,v.y2); maxY=Math.max(v.y1,v.y2);
+  } else {
+    minX=Infinity;minY=Infinity;maxX=-Infinity;maxY=-Infinity;
+    v.points.forEach(function(p){ minX=Math.min(minX,p[0]); maxX=Math.max(maxX,p[0]); minY=Math.min(minY,p[1]); maxY=Math.max(maxY,p[1]); });
+  }
+  return {minX:minX-pad, minY:minY-pad, maxX:maxX+pad, maxY:maxY+pad};
+}
+
+DATA.zOrder.forEach(function(id){
+  const e = DATA.elementsById[id];
+  const v = DATA.vectorsById[id];
+  if(e){
+    const d=document.createElement('div');
+    d.className='obj';
+    d.style.left=e.x+'px'; d.style.top=e.y+'px';
+    d.style.transform='rotate('+(e.rot||0)+'deg)';
+    d.style.opacity = (e.opacity==null?1:e.opacity);
+    if(e.type==='image'){
+      d.style.width=e.w+'px'; d.style.height=e.h+'px';
+      d.innerHTML='<img src="'+e.src+'">';
+    } else if(e.type==='text'){
+      d.style.width='auto';
+      const t=document.createElement('div');
+      t.className='txt';
+      t.style.color=e.color; t.style.fontSize=e.fontSize+'px';
+      t.style.fontWeight=e.bold?'700':'400';
+      t.style.textDecoration=e.underline?'underline':'none';
+        t.style.whiteSpace = 'pre';
+        t.style.wordBreak = 'normal';
+      t.textContent=e.text;
+      d.appendChild(t);
+    }
+    el.appendChild(d);
+  } else if(v){
+    const b = vecBounds(v);
+    const w = Math.max(1,b.maxX-b.minX), h = Math.max(1,b.maxY-b.minY);
+    const d=document.createElement('div');
+    d.className='obj vec';
+    d.style.left=b.minX+'px'; d.style.top=b.minY+'px'; d.style.width=w+'px'; d.style.height=h+'px';
+    d.style.opacity = (v.opacity==null?1:v.opacity);
+    const svgEl=document.createElementNS(SVGNS,'svg');
+    svgEl.setAttribute('width',w); svgEl.setAttribute('height',h); svgEl.setAttribute('viewBox','0 0 '+w+' '+h);
+    if(v.type==='line'){
+      const x1=v.x1-b.minX, y1=v.y1-b.minY, x2=v.x2-b.minX, y2=v.y2-b.minY;
+      // compute arrow metadata and shorten line if arrow exists
+      let x2s=x2, y2s=y2;
+      if(v.arrow){
+        const meta = computeArrowPoints(x1,y1,x2,y2,v.width);
+        const shorten = Math.min(meta.base*0.75, meta.len*0.25);
+        x2s = x2 - shorten*Math.cos(meta.angle);
+        y2s = y2 - shorten*Math.sin(meta.angle);
+      }
+      const line=document.createElementNS(SVGNS,'line');
+      line.setAttribute('x1',x1); line.setAttribute('y1',y1); line.setAttribute('x2',x2s); line.setAttribute('y2',y2s);
+      line.setAttribute('stroke', v.color); line.setAttribute('stroke-width', v.width);
+      line.setAttribute('stroke-linecap','round');
+      svgEl.appendChild(line);
+      if(v.arrow){
+        const meta = computeArrowPoints(x1,y1,x2,y2,v.width);
+        const poly=document.createElementNS(SVGNS,'polygon');
+        poly.setAttribute('points', meta.pts.map(function(p){ return p[0]+','+p[1]; }).join(' '));
+        poly.setAttribute('fill', v.color);
+        svgEl.appendChild(poly);
+      }
+    } else if(v.type==='path'){
+      const dAttr=v.points.map(function(p,i){ return (i===0?'M':'L')+(p[0]-b.minX)+','+(p[1]-b.minY); }).join(' ');
+      const path=document.createElementNS(SVGNS,'path');
+      path.setAttribute('d', dAttr); path.setAttribute('stroke', v.color); path.setAttribute('stroke-width', v.width);
+      path.setAttribute('fill','none'); path.setAttribute('stroke-linecap','round'); path.setAttribute('stroke-linejoin','round');
+      svgEl.appendChild(path);
+    }
+    d.appendChild(svgEl);
+    el.appendChild(d);
+  }
+});
+
+// pan/zoom (read-only viewer)
+// When this file is embedded in an <iframe> on someone else's page, a bare wheel/scroll
+// or one-finger touch would otherwise "scroll-jack" the host page (the gesture gets
+// captured by the board instead of scrolling the page around it). So when embedded:
+// wheel needs Ctrl/Cmd held to zoom (bare wheel scrolls the host page normally), and
+// panning needs two fingers on touch (one finger scrolls the host page normally).
+const IN_IFRAME = (function(){ try{ return window.self !== window.top; }catch(_){ return true; } })();
+let panning=false, start=null;
+vp.addEventListener('mousedown', function(e){
+  panning=true; start={x:e.clientX-pan.x,y:e.clientY-pan.y}; vp.classList.add('panning'); e.preventDefault();
+});
+window.addEventListener('mousemove', function(e){
+  if(panning){ pan.x=e.clientX-start.x; pan.y=e.clientY-start.y; apply(); }
+});
+window.addEventListener('mouseup', function(){ panning=false; vp.classList.remove('panning'); });
+vp.addEventListener('wheel', function(e){
+  if(IN_IFRAME && !(e.ctrlKey || e.metaKey)) return; // let the host page scroll normally
+  e.preventDefault();
+  const r=vp.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+  const wb={x:(mx-pan.x)/zoom, y:(my-pan.y)/zoom};
+  const factor=Math.exp(-e.deltaY*0.0015);
+  zoom=Math.min(8, Math.max(0.05, zoom*factor));
+  pan.x=mx-wb.x*zoom; pan.y=my-wb.y*zoom;
+  apply();
+}, {passive:false});
+// touch support (basic)
+let lastTouchDist=null, lastTouchMid=null;
+vp.addEventListener('touchstart', function(e){
+  if(e.touches.length===1){
+    if(IN_IFRAME) return; // let a single finger scroll the host page normally
+    panning=true; start={x:e.touches[0].clientX-pan.x,y:e.touches[0].clientY-pan.y};
+  }
+  else if(e.touches.length===2){
+    panning=false;
+    const dx=e.touches[0].clientX-e.touches[1].clientX, dy=e.touches[0].clientY-e.touches[1].clientY;
+    lastTouchDist=Math.hypot(dx,dy);
+    lastTouchMid={x:(e.touches[0].clientX+e.touches[1].clientX)/2, y:(e.touches[0].clientY+e.touches[1].clientY)/2};
+  }
+}, {passive:true});
+vp.addEventListener('touchmove', function(e){
+  if(e.touches.length===1 && panning){
+    pan.x=e.touches[0].clientX-start.x; pan.y=e.touches[0].clientY-start.y; apply();
+  } else if(e.touches.length===2){
+    const dx=e.touches[0].clientX-e.touches[1].clientX, dy=e.touches[0].clientY-e.touches[1].clientY;
+    const dist=Math.hypot(dx,dy);
+    const r=vp.getBoundingClientRect();
+    const mx=lastTouchMid.x-r.left, my=lastTouchMid.y-r.top;
+    const wb={x:(mx-pan.x)/zoom, y:(my-pan.y)/zoom};
+    zoom=Math.min(8, Math.max(0.05, zoom*(dist/lastTouchDist)));
+    pan.x=mx-wb.x*zoom; pan.y=my-wb.y*zoom;
+    lastTouchDist=dist; apply();
+  }
+}, {passive:true});
+vp.addEventListener('touchend', function(){ panning=false; lastTouchDist=null; });
+
+// small fading hint about the modifier-key/two-finger requirement, shown only when embedded
+if(IN_IFRAME){
+  const hint=document.createElement('div');
+  hint.textContent='Ctrl/Cmd+scroll to zoom \u00B7 two fingers to pan';
+  hint.style.cssText='position:fixed;bottom:10px;right:10px;background:rgba(37,40,46,.85);color:#e7e9ec;font:11px sans-serif;padding:5px 9px;border-radius:6px;z-index:5;pointer-events:none;transition:opacity .6s;';
+  document.body.appendChild(hint);
+  setTimeout(function(){ hint.style.opacity='0'; setTimeout(function(){ hint.remove(); }, 700); }, 3500);
+}
+
+
+// initial fit
+${fit ? `
+(function(){
+  const b = DATA.bounds;
+  const w = b.maxX-b.minX || 800, h=b.maxY-b.minY || 600;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  zoom = Math.min(vw/(w+120), vh/(h+120), 1.5);
+  if(!isFinite(zoom) || zoom<=0) zoom=1;
+  pan.x = vw/2 - (b.minX+w/2)*zoom;
+  pan.y = vh/2 - (b.minY+h/2)*zoom;
+  apply();
+})();
+` : `apply();`}
+document.getElementById('btnFitPrev').addEventListener('click', function(){
+  const b = DATA.bounds;
+  const w = b.maxX-b.minX || 800, h=b.maxY-b.minY || 600;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  zoom = Math.min(vw/(w+120), vh/(h+120), 1.5);
+  if(!isFinite(zoom) || zoom<=0) zoom=1;
+  pan.x = vw/2 - (b.minX+w/2)*zoom;
+  pan.y = vh/2 - (b.minY+h/2)*zoom;
+  apply();
+});
+<\/script>
+</body></html>`;
+
+  return html;
+}
+
+async function buildPreviewExport(){
+  const html = await buildPreviewHTML();
+  const blob = new Blob([html], {type:'text/html'});
+  downloadBlob(blob, 'board-preview.html');
+}
+
+async function copyEmbedCode(){
+  const html = await buildPreviewHTML();
+  // srcdoc holds the whole self-contained preview inline — no separate file to host.
+  // Quotes are escaped since srcdoc is itself a double-quoted HTML attribute.
+  const escaped = html.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+  const iframeTag = `<iframe srcdoc="${escaped}" style="width:100%;height:600px;border:0;" loading="lazy" title="Board preview"></iframe>`;
+  try{
+    await navigator.clipboard.writeText(iframeTag);
+    return true;
+  }catch(_){
+    // clipboard API unavailable (e.g. insecure context) — fall back to a download
+    const blob = new Blob([iframeTag], {type:'text/plain'});
+    downloadBlob(blob, 'board-preview-embed.html.txt');
+    return false;
+  }
+}
+
+// ---------------- init ----------------
+renderSubbar();
+tryLoadAutosave();
+resetHistory();
+
+})();
+</script>
+</body>
+</html>
