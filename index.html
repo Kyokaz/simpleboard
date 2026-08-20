@@ -202,6 +202,12 @@ let lastPointerClient = {x: window.innerWidth/2, y: window.innerHeight/2};
 // is in progress. Used to stop the "click empty canvas to deselect" mouseup check from
 // firing just because the cursor ended up off the object at the end of a drag.
 let dragging = false;
+// Safety net: if the window loses focus mid-drag (alt-tab, or the mouse is released
+// outside the browser on some OS/browser combos that don't reliably deliver a mouseup
+// back to the page), the specific drag's own onUp may never run and `dragging` would
+// otherwise stay stuck true for the rest of the session — silently breaking "click empty
+// canvas to deselect" from then on. Resetting on blur keeps that self-contained.
+window.addEventListener('blur', ()=>{ dragging = false; });
 let tool = 'select';
 let snapEnabled = false;
 let gridSize = 40;
@@ -543,7 +549,66 @@ function isTypingTarget(e){
   return t && (t.isContentEditable || t.tagName==='INPUT');
 }
 
+// Shift+scroll over the canvas adjusts the active tool's brush/line/text size (or the
+// selected text/line's size), instead of zooming — a quicker alternative to dragging the
+// subbar slider. Scroll up increases, scroll down decreases. Edits to actual project data
+// (a selected object's size) are committed to history only after scrolling settles, so a
+// long scroll gesture doesn't spam the undo stack with dozens of steps.
+let sizeAdjustCommitTimer = null;
+function scheduleSizeAdjustCommit(){
+  if(sizeAdjustCommitTimer) clearTimeout(sizeAdjustCommitTimer);
+  sizeAdjustCommitTimer = setTimeout(()=>{ sizeAdjustCommitTimer=null; commit(); }, 400);
+}
+function adjustActiveSize(deltaY){
+  const dir = deltaY < 0 ? 1 : -1; // wheel up (negative deltaY) increases size
+  const bar = document.getElementById('subbar');
+  if(tool==='draw'){
+    drawSettings.size = Math.max(1, Math.min(60, drawSettings.size + dir));
+    const inp=bar.querySelector('#drawSize'), val=bar.querySelector('#drawSizeVal');
+    if(inp) inp.value = drawSettings.size; if(val) val.textContent = drawSettings.size;
+    return true;
+  }
+  if(tool==='line'){
+    lineSettings.width = Math.max(1, Math.min(30, lineSettings.width + dir));
+    const inp=bar.querySelector('#lineWidth'), val=bar.querySelector('#lineWidthVal');
+    if(inp) inp.value = lineSettings.width; if(val) val.textContent = lineSettings.width;
+    return true;
+  }
+  if(tool==='text'){
+    textDefaults.size = Math.max(6, Math.min(300, textDefaults.size + dir));
+    const inp=bar.querySelector('#textSize');
+    if(inp) inp.value = textDefaults.size;
+    return true;
+  }
+  if(tool==='select'){
+    if(selectedKind==='element' && selectedId){
+      const el = elements.find(x=>x.id===selectedId);
+      if(el && el.type==='text'){
+        el.fontSize = Math.max(6, Math.min(300, el.fontSize + dir));
+        updateElementDOM(el);
+        const inp=bar.querySelector('#textSize'); if(inp) inp.value = el.fontSize;
+        scheduleSizeAdjustCommit();
+        return true;
+      }
+    } else if(selectedKind==='vector' && selectedId){
+      const v = vectors.find(x=>x.id===selectedId);
+      if(v && (v.type==='line' || v.type==='path')){
+        v.width = Math.max(1, Math.min(30, v.width + dir));
+        renderVector(v);
+        const inp=bar.querySelector('#lineWidth'); if(inp) inp.value = v.width;
+        scheduleSizeAdjustCommit();
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 viewport.addEventListener('wheel', (e)=>{
+  if(e.shiftKey && adjustActiveSize(e.deltaY)){
+    e.preventDefault();
+    return;
+  }
   e.preventDefault();
   const r = viewport.getBoundingClientRect();
   const mx = e.clientX - r.left, my = e.clientY - r.top;
@@ -737,6 +802,7 @@ viewport.addEventListener('mousedown', (e)=>{
 // routinely end with the cursor off the (now moved/resized) object, which would otherwise
 // wrongly deselect immediately after the operation completes.
 viewport.addEventListener('mouseup', (e)=>{
+  if(e.button!==0) return; // middle-click (pan) and right-click shouldn't affect selection
   if(tool!=='select') return;
   // ignore if marquee is active (marquee finish will handle selection)
   if(marqueeEl) return;
@@ -831,7 +897,7 @@ function showGroupOverlay(ids){ removeGroupOverlay(); if(!ids || ids.length<2) r
   const ov = document.createElement('div'); ov.className='group-overlay'; ov.id='groupOverlay';
   ov.style.left = (minX)+'px'; ov.style.top = (minY)+'px'; ov.style.width = (maxX-minX)+'px'; ov.style.height = (maxY-minY)+'px';
   // create handles
-  const se = document.createElement('div'); se.className='g-handle se'; se.style.right='-10px'; se.style.bottom='-10px'; se.style.cursor='nwse-resize'; ov.appendChild(se);
+  const se = document.createElement('div'); se.className='g-handle se'; se.style.right='-10px'; se.style.bottom='-10px'; se.style.cursor='nwse-resize'; se.title='Drag to scale (hold Alt to scale from center)'; ov.appendChild(se);
   const rot = document.createElement('div'); rot.className='g-rot'; ov.appendChild(rot);
   // scale handles to remain constant screen size
   se.style.transform = `scale(${1/zoom})`; se.style.transformOrigin='center center';
@@ -925,28 +991,37 @@ function startGroupScale(e){
   if(e.button!==0) return;
   e.stopPropagation(); e.preventDefault(); if(!groupOverlay) return; dragging = true; const ov = groupOverlay.node; const rect = ov.getBoundingClientRect(); const cx = rect.left + rect.width/2, cy = rect.top + rect.height/2;
   const startPW = clientToWorld(e.clientX, e.clientY);
-  const bboxCenterX = (groupOverlay.bbox.minX + groupOverlay.bbox.maxX)/2;
-  const bboxCenterY = (groupOverlay.bbox.minY + groupOverlay.bbox.maxY)/2;
-  const startDist = Math.hypot(startPW.x - bboxCenterX, startPW.y - bboxCenterY) || 1;
+  // Default pivot is the corner opposite the drag handle (the handle only ever sits at
+  // the group's bottom-right, so that's the bbox's top-left) — matching single-object
+  // resize. Holding Alt switches to scaling from the group's center instead, checked
+  // dynamically per move so toggling Alt mid-drag switches pivot on the fly.
+  const cornerAnchorX = groupOverlay.bbox.minX, cornerAnchorY = groupOverlay.bbox.minY;
+  const centerAnchorX = (groupOverlay.bbox.minX + groupOverlay.bbox.maxX)/2;
+  const centerAnchorY = (groupOverlay.bbox.minY + groupOverlay.bbox.maxY)/2;
+  const startDistCorner = Math.hypot(startPW.x - cornerAnchorX, startPW.y - cornerAnchorY) || 1;
+  const startDistCenter = Math.hypot(startPW.x - centerAnchorX, startPW.y - centerAnchorY) || 1;
   const originals = groupOverlay.ids.filter(id=>!isLocked(id)).map(id=>{
     const el = elements.find(x=>x.id===id);
     if(el){ const ew = el.w!=null?el.w:nodeWidthFallback(el); const eh = el.h!=null?el.h: (el.fontSize||28)*1.4; return {id, kind:'element', el, x:el.x, y:el.y, ew, eh, fontSize:el.fontSize||28, cxEl:el.x+ew/2, cyEl:el.y+eh/2}; }
     const v = vectors.find(x=>x.id===id);
-    if(v){ if(v.type==='line') return {id, kind:'vector-line', v, ox1:v.x1, oy1:v.y1, ox2:v.x2, oy2:v.y2, bbox:vectorBounds(v)}; if(v.type==='path') return {id, kind:'vector-path', v, opoints:v.points.map(p=>[p[0],p[1]]), bbox:vectorBounds(v)}; }
+    if(v){ if(v.type==='line') return {id, kind:'vector-line', v, ox1:v.x1, oy1:v.y1, ox2:v.x2, oy2:v.y2, ow:v.width, bbox:vectorBounds(v)}; if(v.type==='path') return {id, kind:'vector-path', v, opoints:v.points.map(p=>[p[0],p[1]]), ow:v.width, bbox:vectorBounds(v)}; }
     return {id, kind:'unknown'};
   });
   // replace centers with DOM-derived centers for visual correctness
   originals.forEach(o=>{ const node=document.getElementById(o.id); if(node){ const r=node.getBoundingClientRect(); const wc = clientToWorld(r.left + r.width/2, r.top + r.height/2); o.cxEl = wc.x; o.cyEl = wc.y; } });
   const startBBoxW = groupOverlay.bbox.maxX - groupOverlay.bbox.minX;
   const startBBoxH = groupOverlay.bbox.maxY - groupOverlay.bbox.minY;
-  const onMove = rafThrottle((mx,my)=>{
+  const onMove = rafThrottle((mx,my,altKey)=>{
+    const anchorX = altKey ? centerAnchorX : cornerAnchorX;
+    const anchorY = altKey ? centerAnchorY : cornerAnchorY;
+    const startDist = altKey ? startDistCenter : startDistCorner;
     const pw = clientToWorld(mx, my);
-    const dist = Math.hypot(pw.x - bboxCenterX, pw.y - bboxCenterY);
+    const dist = Math.hypot(pw.x - anchorX, pw.y - anchorY);
     const s = Math.max(0.05, Math.min(5, dist / startDist));
     originals.forEach(o=>{
       if(o.kind==='element'){
-        const dx = o.cxEl - bboxCenterX; const dy = o.cyEl - bboxCenterY;
-        const newCx = bboxCenterX + dx * s; const newCy = bboxCenterY + dy * s;
+        const dx = o.cxEl - anchorX; const dy = o.cyEl - anchorY;
+        const newCx = anchorX + dx * s; const newCy = anchorY + dy * s;
         const newW = o.ew * s; const newH = o.eh * s;
         o.el.x = snap(newCx - newW/2); o.el.y = snap(newCy - newH/2);
         if(o.el.w!=null) o.el.w = Math.max(6, Math.round(newW));
@@ -955,20 +1030,24 @@ function startGroupScale(e){
         markDirty(o.el.id);
       } else if(o.kind==='vector-line'){
         const v = o.v;
-        const cx1 = o.ox1 - bboxCenterX, cy1 = o.oy1 - bboxCenterY;
-        const cx2 = o.ox2 - bboxCenterX, cy2 = o.oy2 - bboxCenterY;
-        v.x1 = snap(bboxCenterX + cx1 * s); v.y1 = snap(bboxCenterY + cy1 * s);
-        v.x2 = snap(bboxCenterX + cx2 * s); v.y2 = snap(bboxCenterY + cy2 * s);
+        const cx1 = o.ox1 - anchorX, cy1 = o.oy1 - anchorY;
+        const cx2 = o.ox2 - anchorX, cy2 = o.oy2 - anchorY;
+        v.x1 = snap(anchorX + cx1 * s); v.y1 = snap(anchorY + cy1 * s);
+        v.x2 = snap(anchorX + cx2 * s); v.y2 = snap(anchorY + cy2 * s);
+        // stroke width previously stayed fixed while the group scaled around it, leaving
+        // lines looking disproportionately thin/thick after a resize — scale it too.
+        v.width = Math.max(0.5, Math.round(o.ow * s * 100)/100);
         markDirty(v.id);
       } else if(o.kind==='vector-path'){
         const v = o.v;
-        v.points = o.opoints.map(p=>[ snap(bboxCenterX + (p[0]-bboxCenterX)*s), snap(bboxCenterY + (p[1]-bboxCenterY)*s) ]);
+        v.points = o.opoints.map(p=>[ snap(anchorX + (p[0]-anchorX)*s), snap(anchorY + (p[1]-anchorY)*s) ]);
+        v.width = Math.max(0.5, Math.round(o.ow * s * 100)/100);
         markDirty(v.id);
       }
     });
     recomputeGroupBBox();
   });
-  function handleMove(ev){ onMove(ev.clientX, ev.clientY); }
+  function handleMove(ev){ onMove(ev.clientX, ev.clientY, ev.altKey); }
   function onUp(){ dragging = false; window.removeEventListener('mousemove', handleMove); window.removeEventListener('mouseup', onUp); commit(); }
   window.addEventListener('mousemove', handleMove); window.addEventListener('mouseup', onUp);
 }
@@ -987,8 +1066,10 @@ document.getElementById('fileInput').addEventListener('change', (e)=>{
         addImageElement(reader.result, img.naturalWidth, img.naturalHeight, center.x+offset, center.y+offset);
         offset += 24;
       };
+      img.onerror = ()=>{ alert('Could not load "'+f.name+'" — not a valid image file.'); };
       img.src = reader.result;
     };
+    reader.onerror = ()=>{ failed.push(f.name); alert('Could not read file: '+f.name); };
     reader.readAsDataURL(f);
   });
   e.target.value = '';
@@ -1229,6 +1310,7 @@ function addResizeHandles(wrap, el){
     h.className = 'handle '+c;
     h.style.transform = `scale(${1/zoom})`;
     h.style.transformOrigin = 'center center';
+    h.title = 'Drag to resize (hold Alt to scale from center)';
     h.addEventListener('mousedown', (e)=> startResize(e, el, c, wrap));
     wrap.appendChild(h);
   });
@@ -1246,20 +1328,31 @@ function startResize(e, el, corner, wrap){
   const startWorld = clientToWorld(e.clientX, e.clientY);
   const start = { x:el.x, y:el.y, w:wrap.offsetWidth, h:wrap.offsetHeight, fontSize:el.fontSize };
   const aspect = start.w / (start.h || 1);
+  const centerX = start.x + start.w/2, centerY = start.y + start.h/2;
+  // sign of this corner's offset from the center, used only in alt (center-pivot) mode
+  const signX = (corner==='se'||corner==='ne') ? 1 : -1;
 
-  const onMove = rafThrottle((clientX, clientY)=>{
+  function calcNh(newW){ return el.type==='image' ? newW/aspect : start.h*(newW/start.w); }
+
+  const onMove = rafThrottle((clientX, clientY, altKey)=>{
     const w = clientToWorld(clientX, clientY);
     let dx = w.x-startWorld.x, dy = w.y-startWorld.y;
     let nx=start.x, ny=start.y, nw=start.w, nh=start.h;
 
-    function calcNh(newW){ return el.type==='image' ? newW/aspect : start.h*(newW/start.w); }
-
-    if(corner==='se'){ nw=start.w+dx; nh=calcNh(nw); }
-    else if(corner==='sw'){ nw=start.w-dx; nh=calcNh(nw); nx=start.x+(start.w-nw); }
-    else if(corner==='ne'){ nw=start.w+dx; nh=calcNh(nw); ny=start.y+(start.h-nh); }
-    else if(corner==='nw'){ nw=start.w-dx; nh=calcNh(nw); nx=start.x+(start.w-nw); ny=start.y+(start.h-nh); }
-
-    if(nw<20) nw=20;
+    if(altKey){
+      // Alt held: scale from the shape's center instead of the default opposite-corner
+      // pivot — the dragged corner still tracks the cursor 1:1, but the opposite corner
+      // mirrors it so the center stays put.
+      nw = Math.max(20, start.w + 2*signX*dx);
+      nh = calcNh(nw);
+      nx = centerX - nw/2; ny = centerY - nh/2;
+    } else {
+      if(corner==='se'){ nw=start.w+dx; nh=calcNh(nw); }
+      else if(corner==='sw'){ nw=start.w-dx; nh=calcNh(nw); nx=start.x+(start.w-nw); }
+      else if(corner==='ne'){ nw=start.w+dx; nh=calcNh(nw); ny=start.y+(start.h-nh); }
+      else if(corner==='nw'){ nw=start.w-dx; nh=calcNh(nw); nx=start.x+(start.w-nw); ny=start.y+(start.h-nh); }
+      if(nw<20) nw=20;
+    }
 
     if(el.type==='image'){
       if(nh<12) nh=12;
@@ -1271,7 +1364,7 @@ function startResize(e, el, corner, wrap){
     el.x = snap(nx); el.y = snap(ny);
     updateElementDOM(el);
   });
-  function handleMove(ev){ onMove(ev.clientX, ev.clientY); }
+  function handleMove(ev){ onMove(ev.clientX, ev.clientY, ev.altKey); }
   function onUp(){
     dragging = false;
     window.removeEventListener('mousemove', handleMove);
@@ -1523,6 +1616,7 @@ function addVectorHandles(v){
     const h = document.createElement('div');
     h.className = 'handle '+c;
     h.style.transform = `scale(${1/zoom})`; h.style.transformOrigin = 'center center';
+    h.title = 'Drag to resize (hold Alt to scale from center)';
     h.addEventListener('mousedown', (e)=> startVectorResize(e, v, c));
     elLayer.appendChild(h);
     vectorHandleEls.push(h);
@@ -1563,11 +1657,21 @@ function startVectorResize(e, v, corner){
   const b = vectorTightBounds(v);
   const corners = { nw:{x:b.minX,y:b.minY}, ne:{x:b.maxX,y:b.minY}, sw:{x:b.minX,y:b.maxY}, se:{x:b.maxX,y:b.maxY} };
   const opposite = { nw:'se', ne:'sw', sw:'ne', se:'nw' };
-  const anchor = corners[opposite[corner]];
+  // default pivot is the opposite corner; holding Alt switches to the center pivot instead
+  // (checked dynamically per move so toggling Alt mid-drag switches pivot on the fly)
+  const cornerAnchor = corners[opposite[corner]];
+  const centerAnchor = { x:(b.minX+b.maxX)/2, y:(b.minY+b.maxY)/2 };
   const startCorner = corners[corner];
-  const startDist = Math.hypot(startCorner.x-anchor.x, startCorner.y-anchor.y) || 1;
+  const startDistCorner = Math.hypot(startCorner.x-cornerAnchor.x, startCorner.y-cornerAnchor.y) || 1;
+  const startDistCenter = Math.hypot(startCorner.x-centerAnchor.x, startCorner.y-centerAnchor.y) || 1;
   const orig = v.type==='line' ? {x1:v.x1,y1:v.y1,x2:v.x2,y2:v.y2} : {points:v.points.map(p=>[p[0],p[1]])};
-  const onMove = rafThrottle((clientX, clientY)=>{
+  // stroke width previously stayed fixed while the geometry scaled, so a line/path
+  // dragged much larger or smaller via this handle ended up looking disproportionately
+  // thin or thick relative to its new size — scale it along with everything else.
+  const origWidth = v.width;
+  const onMove = rafThrottle((clientX, clientY, altKey)=>{
+    const anchor = altKey ? centerAnchor : cornerAnchor;
+    const startDist = altKey ? startDistCenter : startDistCorner;
     const w = clientToWorld(clientX, clientY);
     const dist = Math.hypot(w.x-anchor.x, w.y-anchor.y);
     const s = Math.max(0.05, Math.min(20, dist/startDist));
@@ -1577,15 +1681,17 @@ function startVectorResize(e, v, corner){
     } else {
       v.points = orig.points.map(p=>[snap(anchor.x+(p[0]-anchor.x)*s), snap(anchor.y+(p[1]-anchor.y)*s)]);
     }
+    v.width = Math.max(0.5, Math.round(origWidth * s * 100)/100);
     renderVector(v);
     positionVectorHandles(v);
   });
-  function handleMove(ev){ onMove(ev.clientX, ev.clientY); }
+  function handleMove(ev){ onMove(ev.clientX, ev.clientY, ev.altKey); }
   function onUp(){
     dragging = false;
     window.removeEventListener('mousemove', handleMove);
     window.removeEventListener('mouseup', onUp);
     commit();
+    renderSubbar(); // reflect the scaled width in the (now possibly stale) width slider
   }
   window.addEventListener('mousemove', handleMove);
   window.addEventListener('mouseup', onUp);
@@ -1692,8 +1798,10 @@ window.addEventListener('paste', (e)=>{
           const center = clientToWorld(cursorClient.x, cursorClient.y);
           addImageElement(reader.result, img.naturalWidth, img.naturalHeight, center.x, center.y);
         };
+        img.onerror = ()=>{ alert('Could not paste image — the clipboard data was not a valid image.'); };
         img.src = reader.result;
       };
+      reader.onerror = ()=>{ alert('Could not read pasted image data.'); };
       reader.readAsDataURL(file);
       return;
     }
@@ -1762,7 +1870,14 @@ function pasteClipboard(){
       newIds.push(copy.id);
     });
     applyZOrder();
-    if(newIds.length) select(newIds[0], elements.find(e=>e.id===newIds[0])? 'element':'vector');
+    // select every pasted item (not just the first) so a multi-selection paste stays a
+    // multi-selection — lets you immediately drag/transform the whole duplicated group
+    deselect();
+    if(newIds.length===1){
+      select(newIds[0], elements.find(e=>e.id===newIds[0]) ? 'element':'vector');
+    } else if(newIds.length>1){
+      newIds.forEach(id=> addToSelection(id, elements.find(e=>e.id===id) ? 'element':'vector'));
+    }
     commit();
   }
 }
@@ -1842,23 +1957,37 @@ document.getElementById('projectInput').addEventListener('change', (e)=>{
       loadProject(data);
     }catch(err){ alert('Could not load project: '+err.message); }
   };
+  reader.onerror = ()=>{ alert('Could not read project file: '+file.name); };
   reader.readAsText(file);
   e.target.value='';
 });
 function loadProject(data){
   elLayer.innerHTML='';
-  elements = data.elements || [];
-  vectors = data.vectors || [];
-  zOrder = data.zOrder || elements.map(e=>e.id).concat(vectors.map(v=>v.id));
-  pan = data.pan || {x:0,y:0};
-  zoom = data.zoom || 1;
-  idCounter = data.idCounter || (elements.length+vectors.length+1);
+  // filter out anything malformed enough to lack an id — everything else keys off id,
+  // so a single id-less entry (corrupted save, hand-edited JSON) would otherwise cause
+  // confusing failures downstream rather than just being skipped
+  elements = (Array.isArray(data.elements) ? data.elements : []).filter(e=> e && e.id);
+  vectors = (Array.isArray(data.vectors) ? data.vectors : []).filter(v=> v && v.id);
+  const validIds = new Set([...elements.map(e=>e.id), ...vectors.map(v=>v.id)]);
+  zOrder = (Array.isArray(data.zOrder) ? data.zOrder.filter(id=>validIds.has(id)) : []);
+  // any element/vector missing from a (possibly stale/partial) zOrder still needs to render
+  validIds.forEach(id=>{ if(!zOrder.includes(id)) zOrder.push(id); });
+  pan = (data.pan && typeof data.pan.x==='number' && typeof data.pan.y==='number') ? data.pan : {x:0,y:0};
+  zoom = (typeof data.zoom==='number' && isFinite(data.zoom) && data.zoom>0) ? data.zoom : 1;
+  // never trust a stored idCounter blindly — always cross-check against the highest
+  // numeric id actually present, so loading an older/foreign project can't hand out an id
+  // that collides with one already on the board
+  let maxN = 0;
+  validIds.forEach(id=>{ const m = /^el(\d+)$/.exec(id); if(m) maxN = Math.max(maxN, parseInt(m[1],10)); });
+  idCounter = Math.max(typeof data.idCounter==='number' ? data.idCounter : 0, maxN+1, 1);
   applyTransform();
-  elements.forEach(updateElementDOM);
-  vectors.forEach(renderVector);
+  let skipped = 0;
+  elements.forEach(el=>{ try{ updateElementDOM(el); }catch(err){ console.warn('Skipping malformed element on load', el, err); skipped++; } });
+  vectors.forEach(v=>{ try{ renderVector(v); }catch(err){ console.warn('Skipping malformed vector on load', v, err); skipped++; } });
   applyZOrder();
   deselect();
   resetHistory();
+  if(skipped) alert(skipped+' item(s) in this project were corrupted and could not be loaded. The rest of the board loaded normally.');
 }
 
 function downloadBlob(blob, filename){
@@ -1869,11 +1998,34 @@ function downloadBlob(blob, filename){
 }
 
 // ---------------- autosave ----------------
+// Silently swallowing a failed autosave (e.g. QuotaExceededError once embedded images
+// push the saved JSON past localStorage's ~5MB limit) meant work could vanish with zero
+// warning if the tab closed unexpectedly. Now it surfaces a small persistent badge so the
+// user knows to export manually instead, and clears itself once a save succeeds again.
+let autosaveWarned = false;
+function showAutosaveWarning(reason){
+  if(autosaveWarned) return;
+  autosaveWarned = true;
+  const badge = document.createElement('div');
+  badge.id = 'autosaveWarning';
+  badge.textContent = '\u26A0 Autosave failed (' + reason + ') — export your project to avoid losing work';
+  badge.style.cssText = 'position:fixed;bottom:10px;left:10px;z-index:60;background:#5a2020;color:#ffd7d7;font:12px sans-serif;padding:6px 10px;border-radius:6px;box-shadow:0 4px 18px rgba(0,0,0,.35);max-width:340px;';
+  document.body.appendChild(badge);
+}
+function clearAutosaveWarning(){
+  if(!autosaveWarned) return;
+  autosaveWarned = false;
+  const badge = document.getElementById('autosaveWarning');
+  if(badge) badge.remove();
+}
 function trySaveAutosave(){
   try{
     const data = { elements, vectors, zOrder, pan, zoom, idCounter };
     localStorage.setItem('board3_autosave', JSON.stringify(data));
-  }catch(e){ /* ignore */ }
+    clearAutosaveWarning();
+  }catch(e){
+    showAutosaveWarning(e && e.name==='QuotaExceededError' ? 'storage full' : 'browser storage unavailable');
+  }
 }
 function tryLoadAutosave(){
   try{
@@ -1896,11 +2048,20 @@ document.getElementById('exportCancel').addEventListener('click', ()=>{
 });
 const exportQualityInput = document.getElementById('exportQuality');
 if(exportQualityInput){ exportQualityInput.addEventListener('input', (e)=>{ const v = Math.round(parseFloat(e.target.value)*100); document.getElementById('exportQualityVal').textContent = v + '%'; }); }
-document.getElementById('exportConfirm').addEventListener('click', async ()=>{
+document.getElementById('exportConfirm').addEventListener('click', async (e)=>{
   exportSettings.quality = parseFloat(document.getElementById('exportQuality').value) || exportSettings.quality;
   exportSettings.maxImageDim = parseInt(document.getElementById('exportMaxDim').value) || exportSettings.maxImageDim;
-  document.getElementById('exportModalBg').classList.remove('show');
-  await buildPreviewExport();
+  const btn = e.currentTarget;
+  const original = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Building\u2026';
+  try{
+    const exported = await buildPreviewExport();
+    if(exported) document.getElementById('exportModalBg').classList.remove('show');
+  }catch(err){
+    alert('Export failed: '+(err && err.message ? err.message : err));
+  }finally{
+    btn.disabled = false; btn.textContent = original;
+  }
 });
 document.getElementById('exportEmbedCopy').addEventListener('click', async (e)=>{
   exportSettings.quality = parseFloat(document.getElementById('exportQuality').value) || exportSettings.quality;
@@ -1908,9 +2069,15 @@ document.getElementById('exportEmbedCopy').addEventListener('click', async (e)=>
   const btn = e.currentTarget;
   const original = btn.textContent;
   btn.disabled = true; btn.textContent = 'Building\u2026';
-  const copied = await copyEmbedCode();
-  btn.textContent = copied ? 'Copied!' : 'Downloaded (clipboard unavailable)';
-  setTimeout(()=>{ btn.textContent = original; btn.disabled = false; }, 1800);
+  try{
+    const copied = await copyEmbedCode();
+    btn.textContent = copied===null ? original : (copied ? 'Copied!' : 'Downloaded (clipboard unavailable)');
+  }catch(err){
+    btn.textContent = 'Failed — try again';
+    console.warn('Embed code generation failed', err);
+  }finally{
+    setTimeout(()=>{ btn.textContent = original; btn.disabled = false; }, 1800);
+  }
 });
 
 // helper: compress an image dataURL or URL to JPEG with max dimension constraints
@@ -2030,7 +2197,10 @@ function escapeXml(s){ return (s||'').replace(/[&<>\"]/g, c=> ({'&':'&amp;','<':
 function computeArrowPoints(x1,y1,x2,y2,width){
   const angle = Math.atan2(y2-y1, x2-x1);
   const len = Math.hypot(x2-x1, y2-y1);
-  const base = Math.max(14, width*3.0, Math.min(48, len*0.12));
+  // arrowhead size scales only with the line's width setting, never with its length —
+  // it previously grew for any line under ~400 units long (min(48, len*0.12)), so short
+  // arrows got a disproportionately huge head purely from being short.
+  const base = Math.max(14, width*3.0);
   const spread = 0.6;
   const bx = x2 - base*Math.cos(angle-spread), by = y2 - base*Math.sin(angle-spread);
   const cx = x2 - base*Math.cos(angle+spread), cy = y2 - base*Math.sin(angle+spread);
@@ -2081,12 +2251,14 @@ async function buildPreviewHTML(){
   const json = JSON.stringify(dataPayload).replace(/<\/script/g, '<\\/script');
 
   const html = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>Board Preview</title>
+<html><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Board Preview</title>
 <style>
   html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#1b1d22;}
   /* use same editor font stack to preserve appearance */
   body, .txt { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-  #vp{position:fixed;inset:0;overflow:hidden;cursor:grab;
+  #vp{position:fixed;inset:0;overflow:hidden;cursor:grab;touch-action:none;
     background-image:radial-gradient(circle,#2a2d33 1px, transparent 1px);background-size:28px 28px;}
   /* ensure child elements don't block panning in the read-only preview */
   #vp *{pointer-events:none}
@@ -2115,8 +2287,10 @@ let pan={x:0,y:0}, zoom=1;
 function computeArrowPoints(x1,y1,x2,y2,width){
   const angle=Math.atan2(y2-y1,x2-x1);
   const len=Math.hypot(x2-x1,y2-y1);
-  const base=Math.max(8, width*2.2, Math.min(24, len*0.08));
-  const spread=0.45;
+  // kept in sync with the editor's own computeArrowPoints — arrowhead size is a function
+  // of width only, never length, so exported previews render arrows identically to the editor
+  const base=Math.max(14, width*3.0);
+  const spread=0.6;
   const bx=x2-base*Math.cos(angle-spread), by=y2-base*Math.sin(angle-spread);
   const cx=x2-base*Math.cos(angle+spread), cy=y2-base*Math.sin(angle+spread);
   return {pts:[[x2,y2],[bx,by],[cx,cy]], base, angle, len};
@@ -2211,8 +2385,18 @@ DATA.zOrder.forEach(function(id){
 // wheel needs Ctrl/Cmd held to zoom (bare wheel scrolls the host page normally), and
 // panning needs two fingers on touch (one finger scrolls the host page normally).
 const IN_IFRAME = (function(){ try{ return window.self !== window.top; }catch(_){ return true; } })();
+// touch-action is what actually stops the browser (notably iOS Safari) from racing its
+// own gesture recognizers against ours — a two-finger touch left to "touch-action:auto"
+// can get interpreted as a native pinch-zoom or, on iOS Safari specifically, misread as
+// a tab-switch/edge-navigation gesture, since nothing has told the browser this element
+// owns multi-touch. Standalone: we own every touch gesture ourselves, so claim all of
+// them. Embedded: allow native vertical pan so a single finger still scrolls the host
+// page (matching the touchstart/touchmove logic below); two-finger pinch-zoom is still
+// held back to us since 'pinch-zoom' isn't in the allowed value.
+vp.style.touchAction = IN_IFRAME ? 'pan-y' : 'none';
 let panning=false, start=null;
 vp.addEventListener('mousedown', function(e){
+  markUserNavigated();
   panning=true; start={x:e.clientX-pan.x,y:e.clientY-pan.y}; vp.classList.add('panning'); e.preventDefault();
 });
 window.addEventListener('mousemove', function(e){
@@ -2222,6 +2406,7 @@ window.addEventListener('mouseup', function(){ panning=false; vp.classList.remov
 vp.addEventListener('wheel', function(e){
   if(IN_IFRAME && !(e.ctrlKey || e.metaKey)) return; // let the host page scroll normally
   e.preventDefault();
+  markUserNavigated();
   const r=vp.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
   const wb={x:(mx-pan.x)/zoom, y:(my-pan.y)/zoom};
   const factor=Math.exp(-e.deltaY*0.0015);
@@ -2229,24 +2414,58 @@ vp.addEventListener('wheel', function(e){
   pan.x=mx-wb.x*zoom; pan.y=my-wb.y*zoom;
   apply();
 }, {passive:false});
-// touch support (basic)
+// touch support — deliberately NOT passive: touch-action above is the primary defense,
+// but explicitly preventDefault()-ing every gesture we actually handle (single finger
+// standalone, two fingers always) is the second layer that keeps iOS Safari from ever
+// treating an in-progress pinch/pan as its own swipe/tab gesture.
 let lastTouchDist=null, lastTouchMid=null;
+// double-tap-to-zoom: a lot of mobile visitors will reflexively double-tap before they
+// think to try pinching. Tracked independent of IN_IFRAME/panning state, since a tap (no
+// movement) never conflicts with the host page's native scroll the way a drag would.
+let tapStartPos=null, tapMoved=false, lastTapTime=0, lastTapPos=null;
+const TAP_MOVE_TOLERANCE=12, DOUBLE_TAP_MS=300, DOUBLE_TAP_DIST=40, DOUBLE_TAP_ZOOM=2.5;
+function doubleTapZoom(clientX, clientY){
+  markUserNavigated();
+  const r=vp.getBoundingClientRect(), mx=clientX-r.left, my=clientY-r.top;
+  if(zoom < DOUBLE_TAP_ZOOM*0.9){
+    const wb={x:(mx-pan.x)/zoom, y:(my-pan.y)/zoom};
+    zoom=Math.min(8, DOUBLE_TAP_ZOOM);
+    pan.x=mx-wb.x*zoom; pan.y=my-wb.y*zoom;
+    apply();
+  } else {
+    fitView();
+  }
+}
 vp.addEventListener('touchstart', function(e){
   if(e.touches.length===1){
+    tapStartPos={x:e.touches[0].clientX,y:e.touches[0].clientY}; tapMoved=false;
     if(IN_IFRAME) return; // let a single finger scroll the host page normally
+    e.preventDefault();
+    markUserNavigated();
     panning=true; start={x:e.touches[0].clientX-pan.x,y:e.touches[0].clientY-pan.y};
   }
-  else if(e.touches.length===2){
+  else if(e.touches.length>=2){
+    tapStartPos=null;
+    e.preventDefault();
+    markUserNavigated();
     panning=false;
     const dx=e.touches[0].clientX-e.touches[1].clientX, dy=e.touches[0].clientY-e.touches[1].clientY;
     lastTouchDist=Math.hypot(dx,dy);
     lastTouchMid={x:(e.touches[0].clientX+e.touches[1].clientX)/2, y:(e.touches[0].clientY+e.touches[1].clientY)/2};
   }
-}, {passive:true});
+}, {passive:false});
 vp.addEventListener('touchmove', function(e){
-  if(e.touches.length===1 && panning){
-    pan.x=e.touches[0].clientX-start.x; pan.y=e.touches[0].clientY-start.y; apply();
-  } else if(e.touches.length===2){
+  if(e.touches.length===1){
+    if(tapStartPos){
+      const dx=e.touches[0].clientX-tapStartPos.x, dy=e.touches[0].clientY-tapStartPos.y;
+      if(Math.hypot(dx,dy) > TAP_MOVE_TOLERANCE) tapMoved=true;
+    }
+    if(panning){
+      e.preventDefault();
+      pan.x=e.touches[0].clientX-start.x; pan.y=e.touches[0].clientY-start.y; apply();
+    }
+  } else if(e.touches.length>=2 && lastTouchDist!=null){
+    e.preventDefault();
     const dx=e.touches[0].clientX-e.touches[1].clientX, dy=e.touches[0].clientY-e.touches[1].clientY;
     const dist=Math.hypot(dx,dy);
     const r=vp.getBoundingClientRect();
@@ -2256,8 +2475,23 @@ vp.addEventListener('touchmove', function(e){
     pan.x=mx-wb.x*zoom; pan.y=my-wb.y*zoom;
     lastTouchDist=dist; apply();
   }
-}, {passive:true});
-vp.addEventListener('touchend', function(){ panning=false; lastTouchDist=null; });
+}, {passive:false});
+vp.addEventListener('touchend', function(e){
+  panning=false; lastTouchDist=null;
+  if(tapStartPos && !tapMoved && e.changedTouches && e.changedTouches.length===1){
+    const now=Date.now();
+    const tapPos={x:e.changedTouches[0].clientX,y:e.changedTouches[0].clientY};
+    if(lastTapTime && (now-lastTapTime)<DOUBLE_TAP_MS && lastTapPos && Math.hypot(tapPos.x-lastTapPos.x,tapPos.y-lastTapPos.y)<DOUBLE_TAP_DIST){
+      doubleTapZoom(tapPos.x, tapPos.y);
+      lastTapTime=0; lastTapPos=null;
+    } else {
+      lastTapTime=now; lastTapPos=tapPos;
+    }
+  } else {
+    lastTapTime=0; lastTapPos=null;
+  }
+  tapStartPos=null; tapMoved=false;
+});
 
 // small fading hint about the modifier-key/two-finger requirement, shown only when embedded
 if(IN_IFRAME){
@@ -2269,28 +2503,32 @@ if(IN_IFRAME){
 }
 
 
+// shared by initial load, the Fit button, and the resize/orientation-change handler below
+function fitView(){
+  const b = DATA.bounds;
+  const w = b.maxX-b.minX || 800, h=b.maxY-b.minY || 600;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  zoom = Math.min(vw/(w+120), vh/(h+120), 1.5);
+  if(!isFinite(zoom) || zoom<=0) zoom=1;
+  pan.x = vw/2 - (b.minX+w/2)*zoom;
+  pan.y = vh/2 - (b.minY+h/2)*zoom;
+  apply();
+}
 // initial fit
-${fit ? `
-(function(){
-  const b = DATA.bounds;
-  const w = b.maxX-b.minX || 800, h=b.maxY-b.minY || 600;
-  const vw = window.innerWidth, vh = window.innerHeight;
-  zoom = Math.min(vw/(w+120), vh/(h+120), 1.5);
-  if(!isFinite(zoom) || zoom<=0) zoom=1;
-  pan.x = vw/2 - (b.minX+w/2)*zoom;
-  pan.y = vh/2 - (b.minY+h/2)*zoom;
-  apply();
-})();
-` : `apply();`}
-document.getElementById('btnFitPrev').addEventListener('click', function(){
-  const b = DATA.bounds;
-  const w = b.maxX-b.minX || 800, h=b.maxY-b.minY || 600;
-  const vw = window.innerWidth, vh = window.innerHeight;
-  zoom = Math.min(vw/(w+120), vh/(h+120), 1.5);
-  if(!isFinite(zoom) || zoom<=0) zoom=1;
-  pan.x = vw/2 - (b.minX+w/2)*zoom;
-  pan.y = vh/2 - (b.minY+h/2)*zoom;
-  apply();
+${fit ? `fitView();` : `apply();`}
+document.getElementById('btnFitPrev').addEventListener('click', fitView);
+
+// Re-fit on resize/orientation-change (e.g. rotating a phone) so the view doesn't end
+// up mis-framed against the new viewport — but only while the visitor hasn't manually
+// panned/zoomed yet, and only when the export was configured to fit on load; once
+// someone has navigated the preview themselves, resizing shouldn't yank their view back.
+let userNavigated = false;
+function markUserNavigated(){ userNavigated = true; }
+let resizeTimer = null;
+window.addEventListener('resize', function(){
+  if(!${fit ? 'true' : 'false'} || userNavigated) return;
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(fitView, 150);
 });
 <\/script>
 </body></html>`;
@@ -2298,14 +2536,33 @@ document.getElementById('btnFitPrev').addEventListener('click', function(){
   return html;
 }
 
+// A large board with a few full-res images can produce a multi-MB single HTML file.
+// That matters more with the srcdoc embed approach specifically, since the host page's
+// initial parse is blocked until the whole string is inlined. Warn past a rough
+// threshold and let the user back out to lower quality/max dimension instead.
+const EXPORT_SIZE_WARN_BYTES = 3 * 1024 * 1024; // ~3MB
+function formatBytes(bytes){
+  if(bytes < 1024*1024) return Math.round(bytes/1024) + ' KB';
+  return (bytes/(1024*1024)).toFixed(1) + ' MB';
+}
+function confirmExportSize(html, label){
+  const bytes = new Blob([html]).size;
+  if(bytes <= EXPORT_SIZE_WARN_BYTES) return true;
+  const extra = label==='embed code' ? ' and may delay the host page\'s initial render' : '';
+  return confirm('This '+label+' is '+formatBytes(bytes)+' \u2014 large for a single self-contained file'+extra+'.\n\nContinue anyway, or press Cancel and lower the image quality/max dimension above first.');
+}
+
 async function buildPreviewExport(){
   const html = await buildPreviewHTML();
+  if(!confirmExportSize(html, 'export file')) return false;
   const blob = new Blob([html], {type:'text/html'});
   downloadBlob(blob, 'board-preview.html');
+  return true;
 }
 
 async function copyEmbedCode(){
   const html = await buildPreviewHTML();
+  if(!confirmExportSize(html, 'embed code')) return null;
   // srcdoc holds the whole self-contained preview inline — no separate file to host.
   // Quotes are escaped since srcdoc is itself a double-quoted HTML attribute.
   const escaped = html.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
