@@ -14,13 +14,21 @@
     --accent:#ff7a45;
     --accent-2:#5bc0be;
   }
+  :root[data-theme="light"]{
+    --bg:#f3f1eb;
+    --panel:#fffdf8;
+    --panel-2:#ebe7de;
+    --line:#c9c3b7;
+    --text:#25272b;
+    --text-dim:#6d6b66;
+  }
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     background:var(--bg);color:var(--text);user-select:none;}
 
   #viewport{position:fixed;inset:0;overflow:hidden;cursor:default;
-    background-image:radial-gradient(circle,#2a2d33 1px, transparent 1px);
+    background-image:radial-gradient(circle,var(--line) 1px, transparent 1px);
     background-size:28px 28px;}
   #viewport.panning{cursor:grabbing;}
   #viewport.tool-draw{cursor:crosshair;}
@@ -111,6 +119,7 @@
   #subbar button:hover{background:#383c45;}
   #subbar button.active{background:var(--accent);color:#1b1d22;border-color:var(--accent);}
   .text-obj:empty:before{content:attr(data-placeholder);color:var(--text-dim);pointer-events:none}
+  .text-obj a{color:inherit;text-decoration:underline;cursor:pointer;}
 
   #rightbar{position:fixed;top:12px;right:12px;z-index:20;display:flex;gap:6px;}
   #rightbar button{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:8px;
@@ -142,6 +151,7 @@
     justify-content:center;font-size:13px;font-weight:700;cursor:pointer;}
   #btnHelp:hover{background:var(--panel-2);}
   #btnHelp.active{background:var(--accent);color:#1b1d22;border-color:var(--accent);}
+  #btnTheme{min-width:36px;}
 
   #fileInput,#projectInput{display:none;}
 
@@ -201,6 +211,7 @@
   <button id="btnNewCanvas" title="Start a new, blank canvas (Ctrl/Cmd+N)">New</button>
   <button id="btnSaveProject" title="Save editable project as .json (Ctrl/Cmd+S)">Save</button>
   <button id="btnLoadProject" title="Load a .json project (Ctrl/Cmd+O)">Load</button>
+  <button id="btnTheme" title="Switch to light mode" aria-label="Switch to light mode">&#9788;</button>
   <div id="exportMenuWrap" style="position:relative;">
     <button class="primary" id="btnExportMenu" title="Export the board" aria-haspopup="true" aria-expanded="false">Export &#9662;</button>
     <div id="exportMenu" class="export-menu">
@@ -251,6 +262,22 @@
 (function(){
 "use strict";
 const SVGNS = 'http://www.w3.org/2000/svg';
+
+// ---------------- appearance ----------------
+const themeButton = document.getElementById('btnTheme');
+function applyTheme(theme){
+  const isLight = theme === 'light';
+  document.documentElement.dataset.theme = isLight ? 'light' : 'dark';
+  themeButton.innerHTML = isLight ? '&#9790;' : '&#9788;';
+  themeButton.title = isLight ? 'Switch to dark mode' : 'Switch to light mode';
+  themeButton.setAttribute('aria-label', themeButton.title);
+}
+applyTheme(localStorage.getItem('simpleboard-theme') || 'dark');
+themeButton.addEventListener('click', ()=>{
+  const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  localStorage.setItem('simpleboard-theme', next);
+  applyTheme(next);
+});
 
 // ---------------- state ----------------
 let pan = {x:0, y:0};
@@ -501,12 +528,14 @@ function renderSubbar(){
       <label>Box Opacity <input type="range" id="tBoxOpacity" min="0" max="100" value="${bp}"><span id="tBoxOpacityVal">${bp}%</span></label>
       <label>Box Size <input type="number" id="tBoxPadding" min="0" max="60" value="${textDefaults.boxPadding}"></label>` : ''}
       <button id="tBold" class="${textDefaults.bold?'active':''}"><b>B</b></button>
-      <button id="tUnder" class="${textDefaults.underline?'active':''}"><u>U</u></button>`;
+      <button id="tUnder" class="${textDefaults.underline?'active':''}"><u>U</u></button>
+      <button id="tLink" title="Add or edit hyperlink">Link</button>`;
     bar.querySelector('#tBoxToggle').onclick = function(){ textDefaults.box = !textDefaults.box; renderSubbar(); };
     bar.querySelector('#textColor').oninput = e=> updateActiveTextStyle('color', e.target.value);
     bar.querySelector('#textSize').oninput = e=>{ textDefaults.size = +e.target.value; updateActiveTextStyle('fontSize', textDefaults.size); updateToolCursorIndicator(); };
     bar.querySelector('#tBold').onclick = function(){ textDefaults.bold=!textDefaults.bold; this.classList.toggle('active',textDefaults.bold); updateActiveTextStyle('bold', textDefaults.bold); };
     bar.querySelector('#tUnder').onclick = function(){ textDefaults.underline=!textDefaults.underline; this.classList.toggle('active',textDefaults.underline); updateActiveTextStyle('underline', textDefaults.underline); };
+    bar.querySelector('#tLink').onclick = ()=> addLinkToText(selectedId ? elements.find(e=>e.id===selectedId) : null);
     if(textDefaults.box){
       bar.querySelector('#tBoxColor').oninput = e=>{ textDefaults.boxColor = e.target.value; updateActiveTextStyle('boxColor', textDefaults.boxColor); };
       bar.querySelector('#tBoxOpacity').oninput = e=>{ textDefaults.boxOpacity = (+e.target.value)/100; bar.querySelector('#tBoxOpacityVal').textContent = e.target.value+'%'; updateActiveTextStyle('boxOpacity', textDefaults.boxOpacity); };
@@ -520,12 +549,14 @@ function renderSubbar(){
         <label>Color <input type="color" id="textColor" value="${el.color}"></label>
         <label>Size <input type="number" id="textSize" value="${el.fontSize}" min="6" max="300"></label>
         <button id="tBold" class="${el.bold?'active':''}"><b>B</b></button>
-        <button id="tUnder" class="${el.underline?'active':''}"><u>U</u></button>`;
+        <button id="tUnder" class="${el.underline?'active':''}"><u>U</u></button>
+        <button id="tLink" title="Add or edit hyperlink">Link</button>`;
       bar.querySelector('#textColor').oninput = e=>{ el.color=e.target.value; updateElementDOM(el); };
       bar.querySelector('#textColor').addEventListener('change', ()=> commit());
       bar.querySelector('#textSize').addEventListener('change', e=>{ el.fontSize=+e.target.value; updateElementDOM(el); commit(); });
       bar.querySelector('#tBold').onclick = function(){ el.bold=!el.bold; this.classList.toggle('active',el.bold); updateElementDOM(el); commit(); };
       bar.querySelector('#tUnder').onclick = function(){ el.underline=!el.underline; this.classList.toggle('active',el.underline); updateElementDOM(el); commit(); };
+      bar.querySelector('#tLink').onclick = ()=> addLinkToText(el);
       // show per-element box toggle
       const boxBtn = document.createElement('button'); boxBtn.textContent='Box'; boxBtn.className = el.box?'active':'';
       boxBtn.onclick = function(){ el.box = !el.box; updateElementDOM(el); commit(); renderSubbar(); };
@@ -1290,8 +1321,53 @@ function exitTextEdit(el){
   inner.classList.remove('editing');
   // normalize newlines to \n and store
   el.text = inner.innerText.replace(/\r\n/g,'\n');
+  const html = sanitizeTextHTML(inner.innerHTML);
+  if(/<a\s/i.test(html)) el.html = html; else delete el.html;
   // keep no-wrap behavior for text objects (no wrapping in view or edit)
   inner.style.whiteSpace = 'pre'; inner.style.wordBreak = 'normal';
+}
+
+function sanitizeHref(value){
+  const href = String(value||'').trim();
+  return /^(https?:|mailto:|tel:)/i.test(href) ? href : '';
+}
+function sanitizeTextHTML(html){
+  const holder = document.createElement('div');
+  holder.innerHTML = html || '';
+  holder.querySelectorAll('script,style,iframe,object,embed').forEach(node=>node.remove());
+  holder.querySelectorAll('*').forEach(node=>{
+    if(node.tagName==='A'){
+      const href = sanitizeHref(node.getAttribute('href'));
+      if(!href){ node.replaceWith(document.createTextNode(node.textContent||'')); return; }
+      [...node.attributes].forEach(attr=>node.removeAttribute(attr.name));
+      node.setAttribute('href', href);
+      node.setAttribute('target', '_blank');
+      node.setAttribute('rel', 'noopener noreferrer');
+    } else if(!['BR','DIV'].includes(node.tagName)){
+      node.replaceWith(document.createTextNode(node.textContent||''));
+    }
+  });
+  return holder.innerHTML;
+}
+function addLinkToText(el){
+  if(!el) return;
+  const inner = document.getElementById(el.id)?.querySelector('.text-obj');
+  if(!inner) return;
+  const selection = window.getSelection();
+  const hasSelection = selection && selection.rangeCount && inner.contains(selection.anchorNode) && !selection.isCollapsed;
+  const url = sanitizeHref(prompt('Link URL (https://...)', 'https://'));
+  if(!url){ if(url!==null) alert('Please enter an http(s), mailto, or tel link.'); return; }
+  if(hasSelection){
+    document.execCommand('createLink', false, url);
+  } else {
+    inner.innerHTML = '<a href="'+url.replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'">'+escapeHTML(el.text||'')+'</a>';
+  }
+  exitTextEdit(el);
+  updateElementDOM(el);
+  commit();
+}
+function escapeHTML(value){
+  return String(value||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 // ================= ELEMENT DOM (create once, update in place) =================
@@ -1321,6 +1397,9 @@ function ensureElementDOM(el){
     inner.contentEditable = 'false';
     wrap.appendChild(inner);
     elLayer.appendChild(wrap);
+    inner.addEventListener('click', (e)=>{
+      if(e.target.closest && e.target.closest('a')) e.preventDefault();
+    });
     inner.addEventListener('blur', ()=>{ exitTextEdit(el); commit(); });
     wrap.addEventListener('dblclick', (e)=>{ e.stopPropagation(); enterTextEdit(el); });
     attachDragMove(wrap, el, inner);
@@ -1357,7 +1436,10 @@ function updateElementDOM(el){
     inner.dataset.placeholder = 'Text';
     if(el.text){
       inner.classList.remove('placeholder');
-      if(!inner.isContentEditable && inner.innerText !== el.text) inner.innerText = el.text;
+      if(!inner.isContentEditable){
+        if(el.html) inner.innerHTML = sanitizeTextHTML(el.html);
+        else if(inner.innerText !== el.text) inner.innerText = el.text;
+      }
       inner.style.opacity = '';
     } else {
       inner.classList.add('placeholder');
@@ -2710,6 +2792,7 @@ async function buildPreviewHTML(){
   elements.forEach(el=>{
     const copy = JSON.parse(JSON.stringify(el));
     elementsById[copy.id]=copy;
+    if(copy.type==='text' && copy.html) copy.html = sanitizeTextHTML(copy.html);
     if(copy.type==='image'){
       compressPromises.push(compressImageSrc(copy.src, exportSettings.maxImageDim, exportSettings.quality).then(d=>{ copy.src = d; }).catch(()=>{}));
     }
@@ -2737,6 +2820,7 @@ async function buildPreviewHTML(){
     background-color:${bgCss};border:${borderCss};border-radius:${radius}px;${gridCss}}
   /* ensure child elements don't block panning in the read-only preview */
   #vp *{pointer-events:none}
+  #vp a{pointer-events:auto;color:inherit;}
   #vp.panning{cursor:grabbing;}
   #wd{position:absolute;left:0;top:0;transform-origin:0 0;}
   .obj{position:absolute;}
@@ -2830,7 +2914,9 @@ DATA.zOrder.forEach(function(id){
         t.style.borderRadius = '6px';
         t.style.padding = bp+'px';
       }
-      t.textContent=e.text;
+      if(e.html) t.innerHTML = e.html;
+      else t.textContent=e.text;
+      t.querySelectorAll('a').forEach(function(link){ link.addEventListener('click', function(ev){ ev.stopPropagation(); }); });
       d.appendChild(t);
     }
     el.appendChild(d);
@@ -2895,6 +2981,7 @@ const IN_IFRAME = (function(){ try{ return window.self !== window.top; }catch(_)
 vp.style.touchAction = IN_IFRAME ? 'pan-y' : 'none';
 let panning=false, start=null;
 vp.addEventListener('mousedown', function(e){
+  if(e.target.closest && e.target.closest('a')) return;
   markUserNavigated();
   panning=true; start={x:e.clientX-pan.x,y:e.clientY-pan.y}; vp.classList.add('panning'); e.preventDefault();
 });
