@@ -31,8 +31,16 @@
 
   #elements{position:absolute;left:0;top:0;}
 
-  .obj{position:absolute;will-change:transform,left,top,width,height;}
-  .obj{backface-visibility:hidden;transform:translateZ(0);} 
+  /* Promoting every single object to its own GPU compositor layer (will-change/translateZ)
+     used to be applied permanently and unconditionally. With a lot of objects on a board
+     this pushes past the browser's compositor layer budget and is a known trigger for
+     "layer squashing" glitches — objects rendering cut off or vanishing until something
+     forces a full recomposite (exactly what panning/zooming does, which is why it "fixes
+     itself"). Only the actively selected object(s) — the ones actually being dragged/
+     resized/rotated — need the promotion; everything else stays a normal (cheap) layer.
+  */
+  .obj.selected{will-change:transform,left,top,width,height;backface-visibility:hidden;}
+  .obj{position:absolute;}
   .obj.selected > .frame{outline:2px solid var(--accent);}
   .obj .frame{position:absolute;inset:0;pointer-events:none;}
 
@@ -59,6 +67,13 @@
   /* when in draw/text/line mode, let the viewport receive pointer events so drawing/adding text works on top */
   #viewport.tool-draw .obj, #viewport.tool-text .obj, #viewport.tool-line .obj { cursor: inherit !important; pointer-events: none; }
   /* retain pointer-events for UI handles when needed (they live outside .obj) */
+
+  /* brush/text size indicator that follows the pointer while the draw or text tool is
+     active — gives a visual sense of how big the stroke/glyph will be before committing it */
+  #toolCursorIndicator{position:fixed;left:0;top:0;pointer-events:none;z-index:19;display:none;
+    transform:translate(-50%,-50%);box-sizing:border-box;}
+  #toolCursorIndicator.draw{border-radius:50%;border:1.5px solid #fff;mix-blend-mode:difference;}
+  #toolCursorIndicator.text{border-left:2px solid #fff;mix-blend-mode:difference;}
 
   .handle{position:absolute;width:10px;height:10px;background:#fff;border:2px solid var(--accent);
     border-radius:2px;pointer-events:auto;z-index:5;}
@@ -169,15 +184,16 @@
     <div id="elements"></div>
   </div>
 </div>
+<div id="toolCursorIndicator"></div>
 
 <input type="file" id="fileInput" accept="image/*" multiple>
 <input type="file" id="projectInput" accept="application/json">
 
 <div class="modal-bg" id="exportModalBg">
   <div class="modal">
-    <h3>Export Preview HTML</h3>
-    <p>This creates a standalone HTML file with a read-only version of your board (pan + zoom only) — perfect for embedding in a blog via an &lt;iframe&gt;. Images are already embedded as base64, so the exported file is fully self-contained.</p>
-    <label><input type="checkbox" id="startFit" checked> Fit view to content on load</label>
+    <h3 id="exportModalTitle">Export Preview HTML</h3>
+    <p id="exportModalDesc">This creates a standalone HTML file with a read-only version of your board (pan + zoom only) — perfect for embedding in a blog via an &lt;iframe&gt;. Images are already embedded as base64, so the exported file is fully self-contained.</p>
+    <label id="startFitRow"><input type="checkbox" id="startFit" checked> Fit view to content on load</label>
     <label>Image quality <input type="range" id="exportQuality" min="0.1" max="1" step="0.01" value="0.85"> <span id="exportQualityVal">85%</span></label>
     <label>Max image dimension <input type="number" id="exportMaxDim" value="800" min="64" max="4096"> px</label>
     <div class="row">
@@ -217,6 +233,12 @@ let vectors = [];       // lines + paths  {id,type:'line'|'path', ...}
 let zOrder = [];        // stacking order, back-to-front, shared across elements+vectors
 let idCounter = 1;
 function newId(){ return 'el'+(idCounter++); }
+// Undo history keeps up to HISTORY_LIMIT full snapshots of the board. If every snapshot
+// carried each image's full base64 data along with it, a handful of images could balloon
+// history into hundreds of MB and was almost certainly the main cause of the browser
+// tab crashing on image/object-heavy boards. imageStore holds each image's data exactly
+// once, keyed by element id; snapshots reference the id and never duplicate the bytes.
+let imageStore = {};
 
 let selectedId = null;
 let selectedKind = null; // 'element' | 'vector'
@@ -234,6 +256,35 @@ function applyTransform(){
   document.getElementById('zoomIndicator').textContent = Math.round(zoom*100)+'%';
   // keep handles visually constant size by inverse-scaling them
   document.querySelectorAll('.handle, .line-handle, .g-handle, .g-rot').forEach(h=>{ h.style.transform = `scale(${1/zoom})`; h.style.transformOrigin='center center'; });
+  updateToolCursorIndicator();
+}
+
+// Brush/text-size cursor indicator: a ring for the draw tool sized to the brush diameter,
+// and a caret for the text tool sized to the font height — both in screen pixels so they
+// track the current zoom level, and both positioned at the last known pointer location.
+const toolCursorEl = document.getElementById('toolCursorIndicator');
+function updateToolCursorIndicator(){
+  if(!toolCursorEl) return;
+  const x = lastPointerClient.x, y = lastPointerClient.y;
+  if(tool==='draw'){
+    const d = Math.max(4, drawSettings.size * zoom);
+    toolCursorEl.className = 'draw';
+    toolCursorEl.style.width = d+'px';
+    toolCursorEl.style.height = d+'px';
+    toolCursorEl.style.left = x+'px';
+    toolCursorEl.style.top = y+'px';
+    toolCursorEl.style.display = 'block';
+  } else if(tool==='text'){
+    const h = Math.max(6, textDefaults.size * zoom);
+    toolCursorEl.className = 'text';
+    toolCursorEl.style.width = '0px';
+    toolCursorEl.style.height = h+'px';
+    toolCursorEl.style.left = x+'px';
+    toolCursorEl.style.top = y+'px';
+    toolCursorEl.style.display = 'block';
+  } else {
+    toolCursorEl.style.display = 'none';
+  }
 }
 
 // --------- batched DOM updates to reduce reflow ---------
@@ -274,6 +325,14 @@ function rafThrottle(fn){
 // Used by every rotate handle while Shift is held.
 function snapAngle(deg){ return Math.round(deg/15)*15; }
 
+function hexToRgba(hex, opacity){
+  let h = (hex||'#ffffff').replace('#','');
+  if(h.length===3) h = h.split('').map(c=>c+c).join('');
+  const n = parseInt(h,16) || 0xffffff;
+  const r=(n>>16)&255, g=(n>>8)&255, b=n&255;
+  return `rgba(${r},${g},${b},${opacity==null?1:opacity})`;
+}
+
 // ---------------- toolbar ----------------
 document.querySelectorAll('.tbtn[data-tool]').forEach(btn=>{
   btn.addEventListener('click', ()=> setTool(btn.dataset.tool));
@@ -287,6 +346,7 @@ function setTool(t){
   if(t==='text') viewport.classList.add('tool-text');
   deselect();
   renderSubbar();
+  updateToolCursorIndicator();
 }
 
 document.getElementById('btnSnap').addEventListener('click', function(){
@@ -344,7 +404,14 @@ document.getElementById('btnToBack').addEventListener('click', sendToBack);
 // ---------------- sub-toolbar (contextual settings) ----------------
 let drawSettings = {color:'#ff7a45', size:8};
 let lineSettings = {color:'#5bc0be', width:4, arrow:true};
-let textDefaults = {size:28, color:'#e7e9ec', bold:false, underline:false, box:false};
+let textDefaults = {size:28, color:'#e7e9ec', bold:false, underline:false, box:false, boxColor:'#ffffff', boxOpacity:0.12, boxPadding:6};
+// Fixed backfill values for elements missing their own box fields — deliberately NOT
+// textDefaults, which is a live, shared, continuously-edited slider value. Backfilling
+// from textDefaults meant a text box's "default" opacity silently depended on whatever
+// you'd last set the slider to while working on some other, unrelated element — which is
+// why previously-untouched boxes could end up with random-looking, inconsistent opacity.
+// These constants match the export template's own hardcoded fallback exactly.
+const BOX_DEFAULT_COLOR = '#ffffff', BOX_DEFAULT_OPACITY = 0.12, BOX_DEFAULT_PADDING = 6;
 // export/compression settings (editable in export modal)
 let exportSettings = { quality: 0.85, maxImageDim: 800 };
 
@@ -369,7 +436,7 @@ function renderSubbar(){
       <label>Color <input type="color" id="drawColor" value="${drawSettings.color}"></label>
       <label>Size <input type="range" id="drawSize" min="1" max="60" value="${drawSettings.size}"><span id="drawSizeVal">${drawSettings.size}</span></label>`;
     bar.querySelector('#drawColor').oninput = e=> drawSettings.color = e.target.value;
-    bar.querySelector('#drawSize').oninput = e=>{ drawSettings.size = +e.target.value; bar.querySelector('#drawSizeVal').textContent = e.target.value; };
+    bar.querySelector('#drawSize').oninput = e=>{ drawSettings.size = +e.target.value; bar.querySelector('#drawSizeVal').textContent = e.target.value; updateToolCursorIndicator(); };
   } else if(tool==='line'){
     show = true;
     bar.innerHTML = `
@@ -381,17 +448,27 @@ function renderSubbar(){
     bar.querySelector('#arrowToggle').onclick = function(){ lineSettings.arrow = !lineSettings.arrow; this.classList.toggle('active', lineSettings.arrow); };
   } else if(tool==='text'){
     show = true;
+    const bp = Math.round(textDefaults.boxOpacity*100);
     bar.innerHTML = `
       <label>Color <input type="color" id="textColor" value="${textDefaults.color}"></label>
       <label>Size <input type="number" id="textSize" value="${textDefaults.size}" min="6" max="300"></label>
       <button id="tBoxToggle" class="${textDefaults.box?'active':''}">Box</button>
+      ${textDefaults.box ? `
+      <label>Box Color <input type="color" id="tBoxColor" value="${textDefaults.boxColor}"></label>
+      <label>Box Opacity <input type="range" id="tBoxOpacity" min="0" max="100" value="${bp}"><span id="tBoxOpacityVal">${bp}%</span></label>
+      <label>Box Size <input type="number" id="tBoxPadding" min="0" max="60" value="${textDefaults.boxPadding}"></label>` : ''}
       <button id="tBold" class="${textDefaults.bold?'active':''}"><b>B</b></button>
       <button id="tUnder" class="${textDefaults.underline?'active':''}"><u>U</u></button>`;
-    bar.querySelector('#tBoxToggle').onclick = function(){ textDefaults.box = !textDefaults.box; this.classList.toggle('active', textDefaults.box); };
+    bar.querySelector('#tBoxToggle').onclick = function(){ textDefaults.box = !textDefaults.box; renderSubbar(); };
     bar.querySelector('#textColor').oninput = e=> updateActiveTextStyle('color', e.target.value);
-    bar.querySelector('#textSize').oninput = e=> updateActiveTextStyle('fontSize', +e.target.value);
+    bar.querySelector('#textSize').oninput = e=>{ textDefaults.size = +e.target.value; updateActiveTextStyle('fontSize', textDefaults.size); updateToolCursorIndicator(); };
     bar.querySelector('#tBold').onclick = function(){ textDefaults.bold=!textDefaults.bold; this.classList.toggle('active',textDefaults.bold); updateActiveTextStyle('bold', textDefaults.bold); };
     bar.querySelector('#tUnder').onclick = function(){ textDefaults.underline=!textDefaults.underline; this.classList.toggle('active',textDefaults.underline); updateActiveTextStyle('underline', textDefaults.underline); };
+    if(textDefaults.box){
+      bar.querySelector('#tBoxColor').oninput = e=>{ textDefaults.boxColor = e.target.value; updateActiveTextStyle('boxColor', textDefaults.boxColor); };
+      bar.querySelector('#tBoxOpacity').oninput = e=>{ textDefaults.boxOpacity = (+e.target.value)/100; bar.querySelector('#tBoxOpacityVal').textContent = e.target.value+'%'; updateActiveTextStyle('boxOpacity', textDefaults.boxOpacity); };
+      bar.querySelector('#tBoxPadding').addEventListener('change', e=>{ textDefaults.boxPadding = Math.max(0, +e.target.value)||0; updateActiveTextStyle('boxPadding', textDefaults.boxPadding); });
+    }
   } else if(selectedKind==='element' && selectedId){
     const el = elements.find(e=>e.id===selectedId);
     if(el && el.type==='text'){
@@ -408,8 +485,32 @@ function renderSubbar(){
       bar.querySelector('#tUnder').onclick = function(){ el.underline=!el.underline; this.classList.toggle('active',el.underline); updateElementDOM(el); commit(); };
       // show per-element box toggle
       const boxBtn = document.createElement('button'); boxBtn.textContent='Box'; boxBtn.className = el.box?'active':'';
-      boxBtn.onclick = function(){ el.box = !el.box; this.classList.toggle('active', el.box); updateElementDOM(el); commit(); };
+      boxBtn.onclick = function(){ el.box = !el.box; updateElementDOM(el); commit(); renderSubbar(); };
       bar.appendChild(boxBtn);
+      if(el.box){
+        if(el.boxColor==null) el.boxColor = BOX_DEFAULT_COLOR;
+        if(el.boxOpacity==null) el.boxOpacity = BOX_DEFAULT_OPACITY;
+        if(el.boxPadding==null) el.boxPadding = BOX_DEFAULT_PADDING;
+        const boxColorLbl = document.createElement('label');
+        boxColorLbl.innerHTML = `Box Color <input type="color" id="elBoxColor" value="${el.boxColor}">`;
+        bar.appendChild(boxColorLbl);
+        const boxColorInput = boxColorLbl.querySelector('#elBoxColor');
+        boxColorInput.oninput = e=>{ el.boxColor=e.target.value; updateElementDOM(el); };
+        boxColorInput.addEventListener('change', ()=> commit());
+
+        const opPct = Math.round(el.boxOpacity*100);
+        const boxOpLbl = document.createElement('label');
+        boxOpLbl.innerHTML = `Box Opacity <input type="range" id="elBoxOpacity" min="0" max="100" value="${opPct}"><span id="elBoxOpacityVal">${opPct}%</span>`;
+        bar.appendChild(boxOpLbl);
+        const boxOpInput = boxOpLbl.querySelector('#elBoxOpacity');
+        boxOpInput.oninput = e=>{ el.boxOpacity=(+e.target.value)/100; boxOpLbl.querySelector('#elBoxOpacityVal').textContent=e.target.value+'%'; updateElementDOM(el); };
+        boxOpInput.addEventListener('change', ()=> commit());
+
+        const boxPadLbl = document.createElement('label');
+        boxPadLbl.innerHTML = `Box Size <input type="number" id="elBoxPadding" min="0" max="60" value="${el.boxPadding}">`;
+        bar.appendChild(boxPadLbl);
+        boxPadLbl.querySelector('#elBoxPadding').addEventListener('change', e=>{ el.boxPadding=Math.max(0,+e.target.value)||0; updateElementDOM(el); commit(); });
+      }
     }
   } else if(selectedKind==='vector' && selectedId){
     const v = vectors.find(x=>x.id===selectedId);
@@ -462,10 +563,18 @@ function applyOpacityToSelection(ids, val){
     if(v){ v.opacity = val; renderVector(v); }
   });
 }
+let activeTextStyleCommitTimer = null;
 function updateActiveTextStyle(prop, val){
   if(selectedKind==='element'){
     const el = elements.find(e=>e.id===selectedId);
-    if(el && el.type==='text'){ el[prop]=val; updateElementDOM(el); }
+    if(el && el.type==='text'){
+      el[prop]=val; updateElementDOM(el);
+      // debounced commit so continuous input (dragging a slider) doesn't spam undo
+      // history, while still actually persisting the change instead of leaving it
+      // live-only until some unrelated edit happens to commit next
+      if(activeTextStyleCommitTimer) clearTimeout(activeTextStyleCommitTimer);
+      activeTextStyleCommitTimer = setTimeout(()=>{ activeTextStyleCommitTimer=null; commit(); }, 400);
+    }
   }
 }
 
@@ -480,7 +589,9 @@ viewport.addEventListener('mousedown', (e)=>{
   }
 });
 // track last pointer for paste placement
-viewport.addEventListener('mousemove', (e)=>{ lastPointerClient = {x:e.clientX, y:e.clientY}; });
+viewport.addEventListener('mousemove', (e)=>{ lastPointerClient = {x:e.clientX, y:e.clientY}; updateToolCursorIndicator(); });
+viewport.addEventListener('mouseleave', ()=>{ if(toolCursorEl) toolCursorEl.style.display='none'; });
+viewport.addEventListener('mouseenter', ()=> updateToolCursorIndicator());
 
 const onPanMove = rafThrottle((clientX, clientY)=>{
   pan.x = clientX - panStart.x;
@@ -1079,6 +1190,7 @@ function addImageElement(dataUrl, natW, natH, cx, cy){
   // keep original image data and dimensions in-editor; compression/downscale only applied for exports
   const w = natW, h = natH;
   const el = { id:newId(), type:'image', src:dataUrl, x:snap(cx-w/2), y:snap(cy-h/2), w, h, rot:0 };
+  imageStore[el.id] = dataUrl;
   elements.push(el);
   updateElementDOM(el);
   select(el.id,'element');
@@ -1090,7 +1202,8 @@ function createTextAt(x,y){
   const el = {
     id:newId(), type:'text', x:snap(x), y:snap(y), w:null, rot:0,
     text:'', color:textDefaults.color, fontSize:textDefaults.size,
-    bold:textDefaults.bold, underline:textDefaults.underline, box:!!textDefaults.box
+    bold:textDefaults.bold, underline:textDefaults.underline, box:!!textDefaults.box,
+    boxColor:textDefaults.boxColor, boxOpacity:textDefaults.boxOpacity, boxPadding:textDefaults.boxPadding
   };
   elements.push(el);
   updateElementDOM(el);
@@ -1198,9 +1311,24 @@ function updateElementDOM(el){
       if(!inner.isContentEditable) inner.innerText = '';
       inner.style.opacity = '';
     }
-    // box background
-    inner.style.background = el.box ? 'rgba(255,255,255,0.03)' : 'transparent';
-    inner.style.borderRadius = el.box ? '6px' : '';
+    // box background — color/opacity/padding are per-element. Older elements (or ones
+    // whose box was toggled on without ever opening this element's own subbar controls)
+    // won't have these fields yet — backfill them onto the element itself right here so
+    // the export (which has no access to the editor's live tool-default state) always
+    // reads the exact same values the editor is currently showing, instead of the two
+    // falling back independently and drifting apart.
+    if(el.box){
+      if(el.boxColor==null) el.boxColor = BOX_DEFAULT_COLOR;
+      if(el.boxOpacity==null) el.boxOpacity = BOX_DEFAULT_OPACITY;
+      if(el.boxPadding==null) el.boxPadding = BOX_DEFAULT_PADDING;
+      inner.style.background = hexToRgba(el.boxColor, el.boxOpacity);
+      inner.style.borderRadius = '6px';
+      inner.style.padding = el.boxPadding+'px';
+    } else {
+      inner.style.background = 'transparent';
+      inner.style.borderRadius = '';
+      inner.style.padding = '2px 4px';
+    }
   }
 }
 
@@ -1778,12 +1906,22 @@ function startFreeDraw(startPos){
 }
 
 // ================= CLIPBOARD PASTE =================
-// Single source of truth for Ctrl+V: OS/browser image (e.g. copied from a web page) takes
-// priority, then our own in-app clipboard (from Ctrl+C on a selection), then plain OS text.
+// Single source of truth for Ctrl+V: our own in-app clipboard (from Ctrl+C on a selection)
+// takes priority, since it reflects the most recent explicit copy the user made on the board.
+// Only if there's nothing in-app do we fall back to an OS/browser image, then plain OS text.
 window.addEventListener('paste', (e)=>{
   // let native paste behave normally inside editable fields (e.g. editing a text object)
   const ae = document.activeElement;
   if(ae && (ae.isContentEditable || ae.tagName==='INPUT' || ae.tagName==='TEXTAREA')) return;
+
+  // our own in-app clipboard (from Ctrl+C on a selection) takes priority over any OS-level
+  // image, since copying an object should always paste that object back, even if there's an
+  // older/unrelated image still sitting in the system clipboard (e.g. from a browser copy)
+  if((clipboard.elements && clipboard.elements.length) || (clipboard.vectors && clipboard.vectors.length)){
+    e.preventDefault();
+    pasteClipboard();
+    return;
+  }
 
   const items = (e.clipboardData && e.clipboardData.items) || [];
   for(const item of items){
@@ -1807,14 +1945,7 @@ window.addEventListener('paste', (e)=>{
     }
   }
 
-  // no OS-level image found — prefer our own most-recently-copied board items over
-  // whatever stray text might be sitting in the OS clipboard from something else
-  if((clipboard.elements && clipboard.elements.length) || (clipboard.vectors && clipboard.vectors.length)){
-    e.preventDefault();
-    pasteClipboard();
-    return;
-  }
-
+  // no in-app clipboard and no OS-level image — fall back to plain OS text
   const text = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
   if(text){
     e.preventDefault();
@@ -1856,6 +1987,7 @@ function pasteClipboard(){
       copy.id = newId();
       copy.x = snap((copy.x||0) + dx);
       copy.y = snap((copy.y||0) + dy);
+      if(copy.type==='image') imageStore[copy.id] = copy.src;
       elements.push(copy);
       updateElementDOM(copy);
       newIds.push(copy.id);
@@ -1889,7 +2021,9 @@ let isRestoring = false;
 const HISTORY_LIMIT = 100;
 
 function snapshotState(){
-  return JSON.stringify({ elements, vectors, zOrder });
+  // strip image bytes out of the snapshot itself — see imageStore comment above
+  const trimmed = elements.map(el => el.type==='image' ? (({src, ...rest}) => rest)(el) : el);
+  return JSON.stringify({ elements: trimmed, vectors, zOrder });
 }
 function commit(){
   if(isRestoring) return;
@@ -1900,14 +2034,16 @@ function commit(){
   if(history.length>HISTORY_LIMIT) history.shift();
   historyIndex = history.length-1;
   updateUndoRedoButtons();
-  // autosave after each commit
-  trySaveAutosave();
+  // autosave after each commit (debounced — see scheduleAutosave)
+  scheduleAutosave();
 }
 function restoreState(snap){
   isRestoring = true;
   const data = JSON.parse(snap);
   elLayer.innerHTML = '';
   elements = data.elements;
+  // re-attach image bytes stripped out at snapshot time (see imageStore comment above)
+  elements.forEach(el=>{ if(el.type==='image' && imageStore[el.id]!=null) el.src = imageStore[el.id]; });
   vectors = data.vectors;
   zOrder = data.zOrder || elements.map(e=>e.id).concat(vectors.map(v=>v.id));
   elements.forEach(updateElementDOM);
@@ -1968,6 +2104,9 @@ function loadProject(data){
   // confusing failures downstream rather than just being skipped
   elements = (Array.isArray(data.elements) ? data.elements : []).filter(e=> e && e.id);
   vectors = (Array.isArray(data.vectors) ? data.vectors : []).filter(v=> v && v.id);
+  // (re)populate the image store from whatever was loaded so future undo snapshots can
+  // still dedupe against it
+  elements.forEach(e=>{ if(e.type==='image' && e.src) imageStore[e.id] = e.src; });
   const validIds = new Set([...elements.map(e=>e.id), ...vectors.map(v=>v.id)]);
   zOrder = (Array.isArray(data.zOrder) ? data.zOrder.filter(id=>validIds.has(id)) : []);
   // any element/vector missing from a (possibly stale/partial) zOrder still needs to render
@@ -2018,31 +2157,153 @@ function clearAutosaveWarning(){
   const badge = document.getElementById('autosaveWarning');
   if(badge) badge.remove();
 }
+// ---------------- Autosave storage (IndexedDB, with localStorage fallback) ----------------
+// localStorage has a hard per-origin quota — usually 5-10MB — that's completely unrelated to
+// how much free disk space the machine actually has, which is why "storage full" can show up
+// even with plenty of disk free: a board with a handful of embedded images blows past that
+// small fixed ceiling easily. IndexedDB's quota is tied to real available disk space (browsers
+// typically allow hundreds of MB up to several GB), so it's used as the primary autosave
+// store now; localStorage is kept only as a last-resort fallback for contexts where
+// IndexedDB isn't available at all (e.g. some private-browsing modes).
+const AS_DB_NAME = 'board3_autosave_db', AS_STORE = 'autosave', AS_KEY = 'current';
+let asDbPromise = null;
+function openAutosaveDB(){
+  if(asDbPromise) return asDbPromise;
+  asDbPromise = new Promise((resolve)=>{
+    if(!window.indexedDB){ resolve(null); return; }
+    let req;
+    try{ req = indexedDB.open(AS_DB_NAME, 1); }catch(e){ resolve(null); return; }
+    req.onupgradeneeded = ()=>{ req.result.createObjectStore(AS_STORE); };
+    req.onsuccess = ()=> resolve(req.result);
+    req.onerror = ()=> resolve(null);
+  });
+  return asDbPromise;
+}
+function idbSaveAutosave(dataStr){
+  return openAutosaveDB().then(db=>{
+    if(!db) return false;
+    return new Promise((resolve)=>{
+      try{
+        const tx = db.transaction(AS_STORE, 'readwrite');
+        tx.objectStore(AS_STORE).put(dataStr, AS_KEY);
+        tx.oncomplete = ()=> resolve(true);
+        tx.onerror = ()=> resolve(false);
+      }catch(e){ resolve(false); }
+    });
+  });
+}
+function idbLoadAutosave(){
+  return openAutosaveDB().then(db=>{
+    if(!db) return null;
+    return new Promise((resolve)=>{
+      try{
+        const tx = db.transaction(AS_STORE, 'readonly');
+        const req = tx.objectStore(AS_STORE).get(AS_KEY);
+        req.onsuccess = ()=> resolve(req.result || null);
+        req.onerror = ()=> resolve(null);
+      }catch(e){ resolve(null); }
+    });
+  });
+}
 function trySaveAutosave(){
-  try{
-    const data = { elements, vectors, zOrder, pan, zoom, idCounter };
-    localStorage.setItem('board3_autosave', JSON.stringify(data));
-    clearAutosaveWarning();
-  }catch(e){
-    showAutosaveWarning(e && e.name==='QuotaExceededError' ? 'storage full' : 'browser storage unavailable');
-  }
+  if(autosaveTimer){ clearTimeout(autosaveTimer); autosaveTimer=null; }
+  const dataStr = JSON.stringify({ elements, vectors, zOrder, pan, zoom, idCounter });
+  idbSaveAutosave(dataStr).then(ok=>{
+    if(ok){ clearAutosaveWarning(); return; }
+    // IndexedDB unavailable/failed — fall back to localStorage as a last resort
+    try{
+      localStorage.setItem('board3_autosave', dataStr);
+      clearAutosaveWarning();
+    }catch(e){
+      showAutosaveWarning(e && e.name==='QuotaExceededError' ? 'storage full' : 'browser storage unavailable');
+    }
+  });
 }
-function tryLoadAutosave(){
+// Debounce: running JSON.stringify + a save synchronously on every single commit (every drag
+// tick, every keystroke commit, etc.) was blocking the main thread and contributing to the
+// janky/occasional-crash feeling, especially on boards with several embedded images. Batch
+// rapid edits into one save shortly after they stop, but still force an immediate save on
+// anything that might end the session (see the listeners below) so a debounce in flight is
+// never lost.
+let autosaveTimer = null;
+function scheduleAutosave(){
+  if(autosaveTimer) clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(()=>{ autosaveTimer=null; trySaveAutosave(); }, 800);
+}
+async function tryLoadAutosave(){
   try{
-    const s = localStorage.getItem('board3_autosave');
-    if(s){ const data = JSON.parse(s); loadProject(data); }
+    let s = await idbLoadAutosave();
+    let migratingFromLocalStorage = false;
+    if(!s){
+      // fall back to (and migrate from) any autosave left over from before IndexedDB was
+      // used, so upgrading doesn't drop whatever was already saved
+      s = localStorage.getItem('board3_autosave');
+      if(s) migratingFromLocalStorage = true;
+    }
+    if(s){
+      const data = JSON.parse(s);
+      loadProject(data);
+      // always start at 100% regardless of whatever zoom was saved — a restored session
+      // shouldn't hand you back a random zoom level from wherever you left off
+      zoom = 1;
+      applyTransform();
+      if(migratingFromLocalStorage){
+        idbSaveAutosave(s).then(ok=>{ if(ok){ try{ localStorage.removeItem('board3_autosave'); }catch(_){ } } });
+      }
+    }
   }catch(e){ console.warn('autosave load failed', e); }
+  resetHistory();
 }
-window.addEventListener('beforeunload', trySaveAutosave);
+// beforeunload is the traditional hook, but it's unreliable on mobile browsers (iOS Safari
+// in particular often kills/backgrounds a tab without ever firing it) — pagehide and
+// visibilitychange fire far more consistently there, so all three are wired up to the same
+// immediate (non-debounced) save.
+function flushPendingEdits(){ if(activeTextStyleCommitTimer){ clearTimeout(activeTextStyleCommitTimer); activeTextStyleCommitTimer=null; commit(); } }
+window.addEventListener('beforeunload', ()=>{ flushPendingEdits(); trySaveAutosave(); });
+window.addEventListener('pagehide', ()=>{ flushPendingEdits(); trySaveAutosave(); });
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='hidden'){ flushPendingEdits(); trySaveAutosave(); } });
+// best-effort safety net: if something throws and the page is about to become unusable,
+// try to persist whatever state we still have rather than losing it silently
+window.addEventListener('error', ()=>{ try{ trySaveAutosave(); }catch(_){ } });
+window.addEventListener('unhandledrejection', ()=>{ try{ trySaveAutosave(); }catch(_){ } });
 
-// ================= EXPORT PREVIEW HTML =================
-document.getElementById('btnExportPreview').addEventListener('click', ()=>{
-  // populate modal controls from current settings
+// ================= EXPORT PREVIEW HTML / PNG =================
+// Both export flows share the same settings modal (image quality / max dimension),
+// since PNG export rasterizes the same compressed images the HTML export embeds.
+// `exportMode` tracks which flow opened the modal so exportConfirm/exportEmbedCopy know
+// what to build, and so the modal copy/buttons can adapt (PNG has no "fit on load" or
+// embed-code option, since those are HTML-preview-only concepts).
+let exportMode = 'html';
+
+function openExportModal(mode){
+  exportMode = mode;
   const q = document.getElementById('exportQuality'); const qm = document.getElementById('exportQualityVal'); const md = document.getElementById('exportMaxDim');
   if(q){ q.value = exportSettings.quality; if(qm) qm.textContent = Math.round(exportSettings.quality*100)+'%'; }
   if(md) md.value = exportSettings.maxImageDim;
+  const title = document.getElementById('exportModalTitle');
+  const desc = document.getElementById('exportModalDesc');
+  const startFitRow = document.getElementById('startFitRow');
+  const embedBtn = document.getElementById('exportEmbedCopy');
+  const confirmBtn = document.getElementById('exportConfirm');
+  if(mode==='png'){
+    if(title) title.textContent = 'Export PNG';
+    if(desc) desc.textContent = 'This renders your board to a single flattened PNG image, matching what you see on the board exactly (fonts, text boxes, rotation, opacity). Images are compressed first using the settings below.';
+    if(startFitRow) startFitRow.style.display = 'none';
+    if(embedBtn) embedBtn.style.display = 'none';
+    if(confirmBtn) confirmBtn.textContent = 'Download PNG';
+  } else {
+    if(title) title.textContent = 'Export Preview HTML';
+    if(desc) desc.textContent = 'This creates a standalone HTML file with a read-only version of your board (pan + zoom only) — perfect for embedding in a blog via an <iframe>. Images are already embedded as base64, so the exported file is fully self-contained.';
+    if(startFitRow) startFitRow.style.display = '';
+    if(embedBtn) embedBtn.style.display = '';
+    if(confirmBtn) confirmBtn.textContent = 'Download File';
+  }
   document.getElementById('exportModalBg').classList.add('show');
-});
+}
+
+document.getElementById('btnExportPreview').addEventListener('click', ()=> openExportModal('html'));
+document.getElementById('btnExportPNG').addEventListener('click', ()=> openExportModal('png'));
+
 document.getElementById('exportCancel').addEventListener('click', ()=>{
   document.getElementById('exportModalBg').classList.remove('show');
 });
@@ -2055,7 +2316,7 @@ document.getElementById('exportConfirm').addEventListener('click', async (e)=>{
   const original = btn.textContent;
   btn.disabled = true; btn.textContent = 'Building\u2026';
   try{
-    const exported = await buildPreviewExport();
+    const exported = exportMode==='png' ? await buildExportPNG() : await buildPreviewExport();
     if(exported) document.getElementById('exportModalBg').classList.remove('show');
   }catch(err){
     alert('Export failed: '+(err && err.message ? err.message : err));
@@ -2121,7 +2382,6 @@ function compressImageSrc(src, maxDim, quality){
 }
 
 document.getElementById('btnFit').addEventListener('click', fitToContent);
-document.getElementById('btnExportPNG').addEventListener('click', ()=> buildExportPNG());
 
 function fitToContent(){
   const b = computeBounds();
@@ -2134,8 +2394,30 @@ function fitToContent(){
   applyTransform();
 }
 
+// shared font stack — must match the board's own CSS (body{font-family:...}) and the
+// HTML preview export's .txt{} rule, so PNG text metrics line up with what's on screen
+// NOTE: single-quoted family names on purpose — this string gets embedded inside a
+// double-quoted style="..." HTML attribute inside the generated SVG/XML for buildExportPNG;
+// double quotes here would prematurely close that attribute and produce malformed XML,
+// which makes the whole SVG fail to parse (silently, as an Image load error).
+const EXPORT_FONT_STACK = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+let _measureCtx = null;
+// per-line widths (not just the max) so multi-line text can be centered/measured accurately
+function measureTextLines(text, fontSize, bold){
+  if(!_measureCtx) _measureCtx = document.createElement('canvas').getContext('2d');
+  _measureCtx.font = `${bold?700:400} ${fontSize}px ${EXPORT_FONT_STACK}`;
+  const lines = (text||'').split('\n');
+  const widths = lines.map(l=> _measureCtx.measureText(l||' ').width);
+  const lineHeight = fontSize*1.25;
+  return { lines, widths, maxWidth: Math.max(0,...widths), lineHeight, height: Math.max(lineHeight, lines.length*lineHeight) };
+}
+
 async function buildExportPNG(){
-  // build a standalone SVG snapshot of the board, compressing images first
+  // build a standalone SVG snapshot of the board, compressing images first.
+  // Text (and its optional background "box") is rendered via native <text>/<tspan>/<rect>
+  // (see the per-element code below) using the same font stack and box styling as the live
+  // board, so PNG output matches the on-canvas look (fonts, boxes, bold/underline, rotation,
+  // opacity) — deliberately avoiding <foreignObject>, which taints the canvas on export.
   const b = computeBounds();
   const width = Math.max(800, Math.ceil(b.maxX-b.minX));
   const height = Math.max(600, Math.ceil(b.maxY-b.minY));
@@ -2152,13 +2434,42 @@ async function buildExportPNG(){
     const e = elements.find(x=>x.id===id);
     const v = vectors.find(x=>x.id===id);
     if(e){
+      const opacity = (e.opacity==null?1:e.opacity);
+      const rot = e.rot||0;
       if(e.type==='image'){
         const src = compMap[e.id] || e.src;
-        parts.push(`<image x="${Math.round(e.x-b.minX)}" y="${Math.round(e.y-b.minY)}" width="${Math.round(e.w)}" height="${Math.round(e.h)}" href="${src}" />`);
+        const x = Math.round(e.x-b.minX), y = Math.round(e.y-b.minY), w = Math.round(e.w), h = Math.round(e.h);
+        const cx = x+w/2, cy = y+h/2;
+        parts.push(`<image x="${x}" y="${y}" width="${w}" height="${h}" href="${src}" opacity="${opacity}" transform="rotate(${rot} ${cx} ${cy})"/>`);
       } else if(e.type==='text'){
-        const txt = escapeXml(e.text||'');
-        const style = `font-size:${e.fontSize}px;fill:${e.color};font-weight:${e.bold?700:400};`;
-        parts.push(`<text x="${Math.round(e.x-b.minX+4)}" y="${Math.round(e.y-b.minY+e.fontSize)}" style="${style}">${txt}</text>`);
+        // Rendered as native SVG <text>/<tspan> rather than <foreignObject>: Chrome (and
+        // some other browsers) permanently taint the canvas when it draws an SVG image
+        // containing foreignObject, even with fully-inlined data-URI content, which makes
+        // canvas.toBlob()/toDataURL() throw "Tainted canvases may not be exported" — so
+        // foreignObject simply can't be rasterized to PNG this way. Native <text> avoids
+        // that entirely; we still match font-family/weight/decoration/color, and use the
+        // canvas-measured line widths (measureTextLines) to size an underlying <rect> for
+        // the optional background "box", and <tspan>s to reproduce multi-line text.
+        const x = Math.round(e.x-b.minX), y = Math.round(e.y-b.minY);
+        const m = measureTextLines(e.text||'', e.fontSize, e.bold);
+        const pad = e.box ? (e.boxPadding==null?BOX_DEFAULT_PADDING:e.boxPadding) : 2;
+        const boxW = Math.ceil(m.maxWidth) + pad*2;
+        const boxH = Math.ceil(m.height) + pad*2;
+        const cx = x+boxW/2, cy = y+boxH/2;
+        const group = [`<g opacity="${opacity}" transform="rotate(${rot} ${cx} ${cy})">`];
+        if(e.box){
+          const bc = e.boxColor==null ? BOX_DEFAULT_COLOR : e.boxColor;
+          const bo = e.boxOpacity==null ? BOX_DEFAULT_OPACITY : e.boxOpacity;
+          group.push(`<rect x="${x}" y="${y}" width="${boxW}" height="${boxH}" rx="6" ry="6" fill="${hexToRgba(bc,bo)}"/>`);
+        }
+        const textStyle = `font-family:${EXPORT_FONT_STACK};font-weight:${e.bold?700:400};`+
+          `text-decoration:${e.underline?'underline':'none'};`;
+        const firstBaseline = y + pad + Math.round(e.fontSize*0.85);
+        const tspans = m.lines.map((line,i)=>
+          `<tspan x="${x+pad}" y="${firstBaseline + i*m.lineHeight}">${escapeXml(line)}</tspan>`).join('');
+        group.push(`<text style="${textStyle}" font-size="${e.fontSize}" fill="${e.color}">${tspans}</text>`);
+        group.push('</g>');
+        parts.push(group.join(''));
       }
     } else if(v){
       if(v.type==='line'){
@@ -2180,16 +2491,26 @@ async function buildExportPNG(){
     }
   });
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">`+parts.join('')+`</svg>`;
-  const img = new Image();
-  const svgBlob = new Blob([svg], {type:'image/svg+xml;charset=utf-8'});
-  const url = URL.createObjectURL(svgBlob);
-  img.onload = ()=>{
-    const cnv = document.createElement('canvas'); cnv.width=width; cnv.height=height;
-    const ctx = cnv.getContext('2d'); ctx.fillStyle='#1b1d22'; ctx.fillRect(0,0,width,height);
-    ctx.drawImage(img,0,0);
-    cnv.toBlob(b=>{ downloadBlob(b, 'board-export.png'); URL.revokeObjectURL(url); }, 'image/png');
-  };
-  img.src = url;
+  return new Promise((resolve, reject)=>{
+    const img = new Image();
+    const svgBlob = new Blob([svg], {type:'image/svg+xml;charset=utf-8'});
+    const url = URL.createObjectURL(svgBlob);
+    img.onload = ()=>{
+      try{
+        const cnv = document.createElement('canvas'); cnv.width=width; cnv.height=height;
+        const ctx = cnv.getContext('2d'); ctx.fillStyle='#1b1d22'; ctx.fillRect(0,0,width,height);
+        ctx.drawImage(img,0,0);
+        cnv.toBlob(b=>{
+          URL.revokeObjectURL(url);
+          if(!b){ reject(new Error('Could not generate PNG data.')); return; }
+          downloadBlob(b, 'board-export.png');
+          resolve(true);
+        }, 'image/png');
+      }catch(err){ URL.revokeObjectURL(url); reject(err); }
+    };
+    img.onerror = ()=>{ URL.revokeObjectURL(url); reject(new Error('Could not render the board to an image. Please try again.')); };
+    img.src = url;
+  });
 }
 
 function escapeXml(s){ return (s||'').replace(/[&<>\"]/g, c=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]); }
@@ -2227,6 +2548,7 @@ function computeBounds(){
 }
 
 async function buildPreviewHTML(){
+  flushPendingEdits();
   const fit = document.getElementById('startFit').checked;
   const bounds = computeBounds();
 
@@ -2284,6 +2606,13 @@ const DATA = ${json};
 const vp=document.getElementById('vp'), wd=document.getElementById('wd'), el=document.getElementById('el'), zi=document.getElementById('zi');
 const SVGNS='http://www.w3.org/2000/svg';
 let pan={x:0,y:0}, zoom=1;
+function hexToRgba(hex, opacity){
+  let h=(hex||'#ffffff').replace('#','');
+  if(h.length===3) h=h.split('').map(c=>c+c).join('');
+  const n=parseInt(h,16)||0xffffff;
+  const r=(n>>16)&255, g=(n>>8)&255, b=n&255;
+  return 'rgba('+r+','+g+','+b+','+(opacity==null?1:opacity)+')';
+}
 function computeArrowPoints(x1,y1,x2,y2,width){
   const angle=Math.atan2(y2-y1,x2-x1);
   const len=Math.hypot(x2-x1,y2-y1);
@@ -2331,6 +2660,14 @@ DATA.zOrder.forEach(function(id){
       t.style.textDecoration=e.underline?'underline':'none';
         t.style.whiteSpace = 'pre';
         t.style.wordBreak = 'normal';
+      if(e.box){
+        const bc = e.boxColor || '#ffffff';
+        const bo = (e.boxOpacity==null) ? 0.12 : e.boxOpacity;
+        const bp = (e.boxPadding==null) ? 6 : e.boxPadding;
+        t.style.background = hexToRgba(bc, bo);
+        t.style.borderRadius = '6px';
+        t.style.padding = bp+'px';
+      }
       t.textContent=e.text;
       d.appendChild(t);
     }
@@ -2423,17 +2760,17 @@ let lastTouchDist=null, lastTouchMid=null;
 // think to try pinching. Tracked independent of IN_IFRAME/panning state, since a tap (no
 // movement) never conflicts with the host page's native scroll the way a drag would.
 let tapStartPos=null, tapMoved=false, lastTapTime=0, lastTapPos=null;
-const TAP_MOVE_TOLERANCE=12, DOUBLE_TAP_MS=300, DOUBLE_TAP_DIST=40, DOUBLE_TAP_ZOOM=2.5;
+const TAP_MOVE_TOLERANCE=12, DOUBLE_TAP_MS=300, DOUBLE_TAP_DIST=40, DOUBLE_TAP_ZOOM_STEP=1.2, MAX_TAP_ZOOM=8;
 function doubleTapZoom(clientX, clientY){
   markUserNavigated();
   const r=vp.getBoundingClientRect(), mx=clientX-r.left, my=clientY-r.top;
-  if(zoom < DOUBLE_TAP_ZOOM*0.9){
+  if(zoom >= MAX_TAP_ZOOM*0.95){
+    fitView();
+  } else {
     const wb={x:(mx-pan.x)/zoom, y:(my-pan.y)/zoom};
-    zoom=Math.min(8, DOUBLE_TAP_ZOOM);
+    zoom=Math.min(MAX_TAP_ZOOM, zoom*DOUBLE_TAP_ZOOM_STEP);
     pan.x=mx-wb.x*zoom; pan.y=my-wb.y*zoom;
     apply();
-  } else {
-    fitView();
   }
 }
 vp.addEventListener('touchstart', function(e){
@@ -2508,7 +2845,7 @@ function fitView(){
   const b = DATA.bounds;
   const w = b.maxX-b.minX || 800, h=b.maxY-b.minY || 600;
   const vw = window.innerWidth, vh = window.innerHeight;
-  zoom = Math.min(vw/(w+120), vh/(h+120), 1.5);
+  zoom = Math.min(vw/(w+120), vh/(h+120), 1);
   if(!isFinite(zoom) || zoom<=0) zoom=1;
   pan.x = vw/2 - (b.minX+w/2)*zoom;
   pan.y = vh/2 - (b.minY+h/2)*zoom;
@@ -2581,7 +2918,6 @@ async function copyEmbedCode(){
 // ---------------- init ----------------
 renderSubbar();
 tryLoadAutosave();
-resetHistory();
 
 })();
 </script>
