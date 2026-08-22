@@ -154,6 +154,17 @@
   .modal button{flex:1;padding:9px;border-radius:7px;border:1px solid var(--line);background:var(--panel-2);color:var(--text);cursor:pointer;}
   .modal button.primary{background:var(--accent);color:#1b1d22;border-color:var(--accent);font-weight:600;}
   .modal label{display:flex;align-items:center;gap:8px;font-size:12.5px;margin-bottom:8px;}
+  .modal-subhead{font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-dim);
+    margin:14px 0 8px;padding-top:12px;border-top:1px solid var(--line);}
+  #embedStyleSection label input[type=color]{width:26px;height:26px;border:none;background:none;padding:0;cursor:pointer;}
+  #embedStyleSection label input[type=range]{flex:1;}
+  #embedPreviewWrap{margin:4px 0 2px;height:84px;border-radius:8px;overflow:hidden;
+    background-image:linear-gradient(45deg,#3a3d44 25%,transparent 25%),linear-gradient(-45deg,#3a3d44 25%,transparent 25%),
+      linear-gradient(45deg,transparent 75%,#3a3d44 75%),linear-gradient(-45deg,transparent 75%,#3a3d44 75%);
+    background-size:16px 16px;background-position:0 0,0 8px,8px -8px,-8px 0px;background-color:#26282e;
+    display:flex;align-items:center;justify-content:center;}
+  #embedPreviewInner{width:80%;height:64%;display:flex;align-items:center;justify-content:center;
+    font-size:11px;color:var(--text-dim);box-sizing:border-box;background-color:#1b1d22;border-radius:0;border:0 solid transparent;}
   .group-overlay{position:absolute;border:2px dashed rgba(91,192,190,0.9);pointer-events:none;}
   /* (removed) deselect overlay — using a non-blocking mouseup handler instead */
   .group-overlay .g-handle{position:absolute;width:12px;height:12px;background:#fff;border:2px solid var(--accent-2);border-radius:3px;pointer-events:auto;}
@@ -220,6 +231,14 @@
     <label id="startFitRow"><input type="checkbox" id="startFit" checked> Fit view to content on load</label>
     <label>Image quality <input type="range" id="exportQuality" min="0.1" max="1" step="0.01" value="0.85"> <span id="exportQualityVal">85%</span></label>
     <label>Max image dimension <input type="number" id="exportMaxDim" value="800" min="64" max="4096"> px</label>
+    <div id="embedStyleSection">
+      <div class="modal-subhead">Embed appearance</div>
+      <label>Background <input type="range" id="embedBgOpacity" min="0" max="100" step="1" value="100"> <span id="embedBgOpacityVal">100%</span></label>
+      <label>Border <input type="number" id="embedBorderWidth" value="0" min="0" max="40" style="width:50px;"> px
+        <input type="color" id="embedBorderColor" value="#3a3d44"></label>
+      <label>Corner radius <input type="number" id="embedRadius" value="0" min="0" max="200" style="width:50px;"> px</label>
+      <div id="embedPreviewWrap"><div id="embedPreviewInner">Preview</div></div>
+    </div>
     <div class="row">
       <button id="exportCancel">Cancel</button>
       <button id="exportEmbedCopy" title="Copies a ready-to-paste &lt;iframe&gt; tag with the whole preview inlined via srcdoc — no separate file to host">Copy Embed Code</button>
@@ -437,7 +456,7 @@ let textDefaults = {size:28, color:'#e7e9ec', bold:false, underline:false, box:f
 // These constants match the export template's own hardcoded fallback exactly.
 const BOX_DEFAULT_COLOR = '#ffffff', BOX_DEFAULT_OPACITY = 0.12, BOX_DEFAULT_PADDING = 6;
 // export/compression settings (editable in export modal)
-let exportSettings = { quality: 0.85, maxImageDim: 800 };
+let exportSettings = { quality: 0.85, maxImageDim: 800, embedBgOpacity: 1, embedBorderWidth: 0, embedBorderColor: '#3a3d44', embedRadius: 0 };
 
 function renderSubbar(){
   const bar = document.getElementById('subbar');
@@ -2338,21 +2357,53 @@ function openExportModal(mode){
   const startFitRow = document.getElementById('startFitRow');
   const embedBtn = document.getElementById('exportEmbedCopy');
   const confirmBtn = document.getElementById('exportConfirm');
+  const embedStyleSection = document.getElementById('embedStyleSection');
   if(mode==='png'){
     if(title) title.textContent = 'Export PNG';
     if(desc) desc.textContent = 'This renders your board to a single flattened PNG image, matching what you see on the board exactly (fonts, text boxes, rotation, opacity). Images are compressed first using the settings below.';
     if(startFitRow) startFitRow.style.display = 'none';
     if(embedBtn) embedBtn.style.display = 'none';
+    if(embedStyleSection) embedStyleSection.style.display = 'none';
     if(confirmBtn) confirmBtn.textContent = 'Download PNG';
   } else {
     if(title) title.textContent = 'Export Preview HTML';
     if(desc) desc.textContent = 'This creates a standalone HTML file with a read-only version of your board (pan + zoom only) — perfect for embedding in a blog via an <iframe>. Images are already embedded as base64, so the exported file is fully self-contained.';
     if(startFitRow) startFitRow.style.display = '';
     if(embedBtn) embedBtn.style.display = '';
+    if(embedStyleSection) embedStyleSection.style.display = '';
     if(confirmBtn) confirmBtn.textContent = 'Download File';
+    // populate embed-appearance controls from the last-used settings
+    document.getElementById('embedBgOpacity').value = Math.round(exportSettings.embedBgOpacity*100);
+    document.getElementById('embedBgOpacityVal').textContent = Math.round(exportSettings.embedBgOpacity*100)+'%';
+    document.getElementById('embedBorderWidth').value = exportSettings.embedBorderWidth;
+    document.getElementById('embedBorderColor').value = exportSettings.embedBorderColor;
+    document.getElementById('embedRadius').value = exportSettings.embedRadius;
+    updateEmbedPreview();
   }
   document.getElementById('exportModalBg').classList.add('show');
 }
+
+// live checkerboard preview so background transparency, border, and corner radius can be
+// judged before committing to a full export — updates instantly as the controls change
+function updateEmbedPreview(){
+  const inner = document.getElementById('embedPreviewInner');
+  if(!inner) return;
+  const opacity = (parseInt(document.getElementById('embedBgOpacity').value,10)||0)/100;
+  const borderWidth = parseInt(document.getElementById('embedBorderWidth').value,10)||0;
+  const borderColor = document.getElementById('embedBorderColor').value || '#3a3d44';
+  const radius = parseInt(document.getElementById('embedRadius').value,10)||0;
+  inner.style.backgroundColor = hexToRgba('#1b1d22', opacity);
+  inner.style.border = borderWidth>0 ? `${borderWidth}px solid ${borderColor}` : '0 solid transparent';
+  inner.style.borderRadius = radius+'px';
+}
+['embedBgOpacity','embedBorderWidth','embedBorderColor','embedRadius'].forEach(id=>{
+  const el = document.getElementById(id);
+  if(!el) return;
+  el.addEventListener('input', ()=>{
+    if(id==='embedBgOpacity') document.getElementById('embedBgOpacityVal').textContent = el.value+'%';
+    updateEmbedPreview();
+  });
+});
 
 // Export dropdown: a single "Export" button reveals both formats, replacing the two
 // separate always-visible buttons this used to be.
@@ -2377,6 +2428,12 @@ if(exportQualityInput){ exportQualityInput.addEventListener('input', (e)=>{ cons
 document.getElementById('exportConfirm').addEventListener('click', async (e)=>{
   exportSettings.quality = parseFloat(document.getElementById('exportQuality').value) || exportSettings.quality;
   exportSettings.maxImageDim = parseInt(document.getElementById('exportMaxDim').value) || exportSettings.maxImageDim;
+  if(exportMode==='html'){
+    exportSettings.embedBgOpacity = (parseInt(document.getElementById('embedBgOpacity').value,10)||0)/100;
+    exportSettings.embedBorderWidth = parseInt(document.getElementById('embedBorderWidth').value,10)||0;
+    exportSettings.embedBorderColor = document.getElementById('embedBorderColor').value || exportSettings.embedBorderColor;
+    exportSettings.embedRadius = parseInt(document.getElementById('embedRadius').value,10)||0;
+  }
   const btn = e.currentTarget;
   const original = btn.textContent;
   btn.disabled = true; btn.textContent = 'Building\u2026';
@@ -2392,6 +2449,10 @@ document.getElementById('exportConfirm').addEventListener('click', async (e)=>{
 document.getElementById('exportEmbedCopy').addEventListener('click', async (e)=>{
   exportSettings.quality = parseFloat(document.getElementById('exportQuality').value) || exportSettings.quality;
   exportSettings.maxImageDim = parseInt(document.getElementById('exportMaxDim').value) || exportSettings.maxImageDim;
+  exportSettings.embedBgOpacity = (parseInt(document.getElementById('embedBgOpacity').value,10)||0)/100;
+  exportSettings.embedBorderWidth = parseInt(document.getElementById('embedBorderWidth').value,10)||0;
+  exportSettings.embedBorderColor = document.getElementById('embedBorderColor').value || exportSettings.embedBorderColor;
+  exportSettings.embedRadius = parseInt(document.getElementById('embedRadius').value,10)||0;
   const btn = e.currentTarget;
   const original = btn.textContent;
   btn.disabled = true; btn.textContent = 'Building\u2026';
@@ -2630,6 +2691,20 @@ async function buildPreviewHTML(){
   const fit = document.getElementById('startFit').checked;
   const bounds = computeBounds();
 
+  // embed appearance: html/body stay fully transparent (so the host page's background
+  // shows through when this is embedded via iframe) and the actual visible surface —
+  // background tint, border, and rounded corners — is drawn on #vp instead, since that's
+  // the element that actually covers the viewport and clips its own contents.
+  const bgOpacity = (exportSettings.embedBgOpacity==null?1:exportSettings.embedBgOpacity);
+  const bgCss = hexToRgba('#1b1d22', bgOpacity);
+  const borderWidth = exportSettings.embedBorderWidth||0;
+  const borderColor = exportSettings.embedBorderColor||'#3a3d44';
+  const radius = exportSettings.embedRadius||0;
+  const borderCss = borderWidth>0 ? `${borderWidth}px solid ${borderColor}` : 'none';
+  // the dot grid is an editor affordance, not part of the "content" — it looks out of
+  // place once the background is see-through, so it only shows at full opacity
+  const gridCss = bgOpacity>=0.999 ? 'background-image:radial-gradient(circle,#2a2d33 1px, transparent 1px);background-size:28px 28px;' : '';
+
   const elementsById = {};
   const compressPromises = [];
   elements.forEach(el=>{
@@ -2655,11 +2730,11 @@ async function buildPreviewHTML(){
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Board Preview</title>
 <style>
-  html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#1b1d22;}
+  html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:transparent;}
   /* use same editor font stack to preserve appearance */
   body, .txt { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-  #vp{position:fixed;inset:0;overflow:hidden;cursor:grab;touch-action:none;
-    background-image:radial-gradient(circle,#2a2d33 1px, transparent 1px);background-size:28px 28px;}
+  #vp{position:fixed;inset:0;overflow:hidden;cursor:grab;touch-action:none;box-sizing:border-box;
+    background-color:${bgCss};border:${borderCss};border-radius:${radius}px;${gridCss}}
   /* ensure child elements don't block panning in the read-only preview */
   #vp *{pointer-events:none}
   #vp.panning{cursor:grabbing;}
@@ -3000,7 +3075,7 @@ async function copyEmbedCode(){
   // srcdoc holds the whole self-contained preview inline — no separate file to host.
   // Quotes are escaped since srcdoc is itself a double-quoted HTML attribute.
   const escaped = html.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
-  const iframeTag = `<iframe srcdoc="${escaped}" style="width:100%;height:600px;border:0;" loading="lazy" title="Board preview"></iframe>`;
+  const iframeTag = `<iframe srcdoc="${escaped}" style="width:100%;height:600px;border:0;background:transparent;" loading="lazy" title="Board preview" allowtransparency="true"></iframe>`;
   try{
     await navigator.clipboard.writeText(iframeTag);
     return true;
