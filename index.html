@@ -453,17 +453,27 @@ function sendToBack(){
   applyZOrder(); commit();
 }
 function bringForward(){
-  const id = selectedId; if(!id) return;
-  const idx = zOrder.indexOf(id);
-  if(idx===-1 || idx===zOrder.length-1) return;
-  const tmp = zOrder[idx]; zOrder[idx]=zOrder[idx+1]; zOrder[idx+1]=tmp;
+  const ids = selectedIds.length? selectedIds.slice() : (selectedId? [selectedId] : []);
+  if(!ids.length) return;
+  // process topmost-first so items in the selection don't block each other's step up
+  const sorted = ids.slice().sort((a,b)=> zOrder.indexOf(b)-zOrder.indexOf(a));
+  sorted.forEach(id=>{
+    const idx = zOrder.indexOf(id);
+    if(idx===-1 || idx===zOrder.length-1) return;
+    const tmp = zOrder[idx]; zOrder[idx]=zOrder[idx+1]; zOrder[idx+1]=tmp;
+  });
   applyZOrder(); commit();
 }
 function sendBackward(){
-  const id = selectedId; if(!id) return;
-  const idx = zOrder.indexOf(id);
-  if(idx<=0) return;
-  const tmp = zOrder[idx]; zOrder[idx]=zOrder[idx-1]; zOrder[idx-1]=tmp;
+  const ids = selectedIds.length? selectedIds.slice() : (selectedId? [selectedId] : []);
+  if(!ids.length) return;
+  // process bottommost-first so items in the selection don't block each other's step down
+  const sorted = ids.slice().sort((a,b)=> zOrder.indexOf(a)-zOrder.indexOf(b));
+  sorted.forEach(id=>{
+    const idx = zOrder.indexOf(id);
+    if(idx<=0) return;
+    const tmp = zOrder[idx]; zOrder[idx]=zOrder[idx-1]; zOrder[idx-1]=tmp;
+  });
   applyZOrder(); commit();
 }
 document.getElementById('btnToFront').addEventListener('click', bringToFront);
@@ -606,6 +616,30 @@ function renderSubbar(){
   // shown above (or shown on its own for object types — images, freehand paths — that
   // don't have other per-type controls yet).
   const selIds = selectedIds.length ? selectedIds : (selectedId ? [selectedId] : []);
+  if(selIds.length>=2 && tool==='select'){
+    show = true;
+    const alignWrap = document.createElement('div');
+    alignWrap.style.cssText = 'display:flex;gap:3px;align-items:center;';
+    const alignDefs = [
+      ['left','Align left','\u21E4'], ['hcenter','Align horizontal centers','\u2194'], ['right','Align right','\u21E5'],
+      ['top','Align top','\u21E7'], ['vcenter','Align vertical centers','\u2195'], ['bottom','Align bottom','\u21E9']
+    ];
+    alignDefs.forEach(([mode,title,label])=>{
+      const b = document.createElement('button');
+      b.textContent = label; b.title = title;
+      b.onclick = ()=> alignSelection(mode);
+      alignWrap.appendChild(b);
+    });
+    bar.appendChild(alignWrap);
+    if(selIds.length>=3){
+      const distWrap = document.createElement('div');
+      distWrap.style.cssText = 'display:flex;gap:3px;align-items:center;';
+      const distH = document.createElement('button'); distH.textContent='Distribute H'; distH.title='Distribute horizontally'; distH.onclick=()=>distributeSelection('h');
+      const distV = document.createElement('button'); distV.textContent='Distribute V'; distV.title='Distribute vertically'; distV.onclick=()=>distributeSelection('v');
+      distWrap.appendChild(distH); distWrap.appendChild(distV);
+      bar.appendChild(distWrap);
+    }
+  }
   if(selIds.length && tool==='select'){
     show = true;
     const first = getOpacity(selIds[0]);
@@ -636,6 +670,72 @@ function applyOpacityToSelection(ids, val){
     const v = vectors.find(x=>x.id===id);
     if(v){ v.opacity = val; renderVector(v); }
   });
+}
+// Axis-aligned world-space bbox for any object, derived from its actual on-screen
+// rect (like marquee selection does) so rotated images/text and lines/paths all agree
+// with what's visually there instead of relying on per-type geometry math.
+function getWorldBBox(id){
+  const node = document.getElementById(id);
+  if(!node) return null;
+  const r = node.getBoundingClientRect();
+  const p1 = clientToWorld(r.left, r.top), p2 = clientToWorld(r.right, r.bottom);
+  return { minX:p1.x, minY:p1.y, maxX:p2.x, maxY:p2.y };
+}
+function translateObjectBy(id, dx, dy){
+  if(!dx && !dy) return;
+  const el = elements.find(x=>x.id===id);
+  if(el){ if(el.locked) return; el.x+=dx; el.y+=dy; updateElementDOM(el); return; }
+  const v = vectors.find(x=>x.id===id);
+  if(v){ if(v.locked) return; if(v.type==='line'){ v.x1+=dx; v.y1+=dy; v.x2+=dx; v.y2+=dy; } else { v.points = v.points.map(p=>[p[0]+dx, p[1]+dy]); } renderVector(v); }
+}
+function alignSelection(mode){
+  const ids = (selectedIds.length? selectedIds : (selectedId? [selectedId] : [])).filter(id=>!isLocked(id));
+  const boxes = ids.map(id=>({id, b:getWorldBBox(id)})).filter(o=>o.b);
+  if(boxes.length<2) return;
+  const minX = Math.min(...boxes.map(o=>o.b.minX)), maxX = Math.max(...boxes.map(o=>o.b.maxX));
+  const minY = Math.min(...boxes.map(o=>o.b.minY)), maxY = Math.max(...boxes.map(o=>o.b.maxY));
+  boxes.forEach(o=>{
+    let dx=0, dy=0;
+    if(mode==='left') dx = minX - o.b.minX;
+    else if(mode==='hcenter') dx = (minX+maxX)/2 - (o.b.minX+o.b.maxX)/2;
+    else if(mode==='right') dx = maxX - o.b.maxX;
+    else if(mode==='top') dy = minY - o.b.minY;
+    else if(mode==='vcenter') dy = (minY+maxY)/2 - (o.b.minY+o.b.maxY)/2;
+    else if(mode==='bottom') dy = maxY - o.b.maxY;
+    translateObjectBy(o.id, dx, dy);
+  });
+  if(groupOverlay) recomputeGroupBBox();
+  commit();
+}
+function distributeSelection(axis){
+  const ids = (selectedIds.length? selectedIds : (selectedId? [selectedId] : [])).filter(id=>!isLocked(id));
+  const boxes = ids.map(id=>({id, b:getWorldBBox(id)})).filter(o=>o.b);
+  if(boxes.length<3) return;
+  if(axis==='h'){
+    boxes.sort((a,b)=>a.b.minX-b.b.minX);
+    const span = boxes[boxes.length-1].b.maxX - boxes[0].b.minX;
+    const totalW = boxes.reduce((s,o)=> s+(o.b.maxX-o.b.minX), 0);
+    const gap = (span-totalW)/(boxes.length-1);
+    let cursor = boxes[0].b.minX;
+    boxes.forEach((o,i)=>{
+      const w = o.b.maxX-o.b.minX;
+      if(i>0 && i<boxes.length-1) translateObjectBy(o.id, cursor-o.b.minX, 0);
+      cursor += w+gap;
+    });
+  } else {
+    boxes.sort((a,b)=>a.b.minY-b.b.minY);
+    const span = boxes[boxes.length-1].b.maxY - boxes[0].b.minY;
+    const totalH = boxes.reduce((s,o)=> s+(o.b.maxY-o.b.minY), 0);
+    const gap = (span-totalH)/(boxes.length-1);
+    let cursor = boxes[0].b.minY;
+    boxes.forEach((o,i)=>{
+      const h = o.b.maxY-o.b.minY;
+      if(i>0 && i<boxes.length-1) translateObjectBy(o.id, 0, cursor-o.b.minY);
+      cursor += h+gap;
+    });
+  }
+  if(groupOverlay) recomputeGroupBBox();
+  commit();
 }
 let activeTextStyleCommitTimer = null;
 function updateActiveTextStyle(prop, val){
@@ -1065,6 +1165,18 @@ function computeGroupBBox(ids){
   ids.forEach(id=>{
     const el = elements.find(x=>x.id===id);
     if(el){
+      // Auto-sized text (no stored w/h) needs its real on-screen box, not the single-line
+      // estimate — same fix as group scale/rotate, otherwise the group overlay undersizes
+      // around multi-line (Shift+Enter) text. getWorldBBox reads the live DOM rect, so it's
+      // already rotation-aware and matches exactly what the marquee lasso uses.
+      const node = document.getElementById(id);
+      const wb = node ? getWorldBBox(id) : null;
+      if(wb){
+        minX = Math.min(minX, wb.minX); minY = Math.min(minY, wb.minY);
+        maxX = Math.max(maxX, wb.maxX); maxY = Math.max(maxY, wb.maxY);
+        return;
+      }
+      // fallback (no live DOM node, e.g. called before first render) — approximate as before
       const ew = el.w!=null?el.w:nodeWidthFallback(el);
       const eh = el.h!=null?el.h:(el.fontSize||28)*1.4;
       const cx = el.x + ew/2, cy = el.y + eh/2;
@@ -1129,9 +1241,19 @@ function startGroupRotate(e){
     if(el){
       // compute visual center from DOM rect and convert to world coords
       let cxEl = el.x + (el.w||nodeWidthFallback(el))/2, cyEl = el.y + ((el.h)||((el.fontSize||28)*1.4))/2;
-      if(node){ const r=node.getBoundingClientRect(); const wc = clientToWorld(r.left + r.width/2, r.top + r.height/2); cxEl = wc.x; cyEl = wc.y; }
-      const ew = el.w!=null ? el.w : nodeWidthFallback(el);
-      const eh = el.h!=null ? el.h : (el.fontSize||28)*1.4;
+      let ew = el.w!=null ? el.w : nodeWidthFallback(el);
+      let eh = el.h!=null ? el.h : (el.fontSize||28)*1.4;
+      if(node){
+        const r=node.getBoundingClientRect();
+        const wc = clientToWorld(r.left + r.width/2, r.top + r.height/2);
+        cxEl = wc.x; cyEl = wc.y;
+        // Auto-sized text's stored w/h is null, so the fallback above only assumes a
+        // single line. Multi-line text (e.g. via Shift+Enter) is taller than that
+        // estimate, which would offset the box on rotate — use the real on-screen size
+        // instead whenever it isn't explicitly stored.
+        if(el.type==='text' || el.w==null) ew = r.width / zoom;
+        if(el.type==='text' || el.h==null) eh = r.height / zoom;
+      }
       return {id, kind:'element', el, cxEl, cyEl, x:el.x, y:el.y, rot:el.rot||0, ew, eh};
     }
     const v = vectors.find(x=>x.id===id);
@@ -1203,7 +1325,21 @@ function startGroupScale(e){
     return {id, kind:'unknown'};
   });
   // replace centers with DOM-derived centers for visual correctness
-  originals.forEach(o=>{ const node=document.getElementById(o.id); if(node){ const r=node.getBoundingClientRect(); const wc = clientToWorld(r.left + r.width/2, r.top + r.height/2); o.cxEl = wc.x; o.cyEl = wc.y; } });
+  originals.forEach(o=>{
+    const node=document.getElementById(o.id);
+    if(node){
+      const r=node.getBoundingClientRect();
+      const wc = clientToWorld(r.left + r.width/2, r.top + r.height/2);
+      o.cxEl = wc.x; o.cyEl = wc.y;
+      // Same fix as group-rotate: auto-sized text's eh/ew fallback assumes a single
+      // line, so multi-line (Shift+Enter) text needs its real on-screen size here too,
+      // or scaling would offset it vertically.
+      if(o.kind==='element'){
+        if(o.el.type==='text' || o.el.w==null) o.ew = r.width / zoom;
+        if(o.el.type==='text' || o.el.h==null) o.eh = r.height / zoom;
+      }
+    }
+  });
   const startBBoxW = groupOverlay.bbox.maxX - groupOverlay.bbox.minX;
   const startBBoxH = groupOverlay.bbox.maxY - groupOverlay.bbox.minY;
   const onMove = rafThrottle((mx,my,altKey)=>{
@@ -1219,9 +1355,13 @@ function startGroupScale(e){
         const newCx = anchorX + dx * s; const newCy = anchorY + dy * s;
         const newW = o.ew * s; const newH = o.eh * s;
         o.el.x = snap(newCx - newW/2); o.el.y = snap(newCy - newH/2);
-        if(o.el.w!=null) o.el.w = Math.max(6, Math.round(newW));
-        if(o.el.h!=null) o.el.h = Math.max(6, Math.round(newH));
-        if(o.fontSize) o.el.fontSize = Math.max(6, Math.round(o.fontSize * s));
+        // keep width/height/fontSize continuous (unrounded) while dragging — rounding
+        // every frame snaps in whole-pixel steps, and for multi-line text that step is
+        // multiplied by however many lines are in the box, making it visibly jumpy.
+        // Rounded once on release (onUp) instead, once the size has settled.
+        if(o.el.w!=null) o.el.w = Math.max(6, newW);
+        if(o.el.h!=null) o.el.h = Math.max(6, newH);
+        if(o.fontSize) o.el.fontSize = Math.max(6, o.fontSize * s);
         markDirty(o.el.id);
       } else if(o.kind==='vector-line'){
         const v = o.v;
@@ -1243,7 +1383,20 @@ function startGroupScale(e){
     recomputeGroupBBox();
   });
   function handleMove(ev){ onMove(ev.clientX, ev.clientY, ev.altKey); }
-  function onUp(){ dragging = false; window.removeEventListener('mousemove', handleMove); window.removeEventListener('mouseup', onUp); commit(); }
+  function onUp(){
+    dragging = false;
+    window.removeEventListener('mousemove', handleMove); window.removeEventListener('mouseup', onUp);
+    // round the sizes left continuous during the drag now that it's settled
+    originals.forEach(o=>{
+      if(o.kind!=='element') return;
+      if(o.el.w!=null) o.el.w = Math.round(o.el.w);
+      if(o.el.h!=null) o.el.h = Math.round(o.el.h);
+      if(o.el.fontSize!=null) o.el.fontSize = Math.round(o.el.fontSize);
+      updateElementDOM(o.el);
+    });
+    recomputeGroupBBox();
+    commit();
+  }
   window.addEventListener('mousemove', handleMove); window.addEventListener('mouseup', onUp);
 }
 
@@ -1264,7 +1417,7 @@ document.getElementById('fileInput').addEventListener('change', (e)=>{
       img.onerror = ()=>{ alert('Could not load "'+f.name+'" — not a valid image file.'); };
       img.src = reader.result;
     };
-    reader.onerror = ()=>{ failed.push(f.name); alert('Could not read file: '+f.name); };
+    reader.onerror = ()=>{ alert('Could not read file: '+f.name); };
     reader.readAsDataURL(f);
   });
   e.target.value = '';
@@ -1622,7 +1775,11 @@ function startResize(e, el, corner, wrap){
       el.w = snap(nw); el.h = snap(nh);
     } else {
       el.w = snap(nw);
-      el.fontSize = Math.max(6, Math.round(start.fontSize*(nw/start.w)));
+      // keep fontSize continuous (unrounded) during the drag — rounding every frame
+      // snaps in whole-pixel steps, and for multi-line text that step is multiplied by
+      // however many lines are in the box, making the resize look jumpy. Rounded once
+      // on release (onUp) instead, once the size has settled.
+      el.fontSize = Math.max(6, start.fontSize*(nw/start.w));
     }
     el.x = snap(nx); el.y = snap(ny);
     updateElementDOM(el);
@@ -1632,6 +1789,7 @@ function startResize(e, el, corner, wrap){
     dragging = false;
     window.removeEventListener('mousemove', handleMove);
     window.removeEventListener('mouseup', onUp);
+    if(el.fontSize!=null){ el.fontSize = Math.round(el.fontSize); updateElementDOM(el); }
     commit();
     renderSubbar();
   }
