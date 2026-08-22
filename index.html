@@ -120,7 +120,19 @@
   #rightbar button.primary:hover{filter:brightness(1.08);}
 
   #zoomIndicator{position:fixed;bottom:12px;left:12px;z-index:20;background:var(--panel);border:1px solid var(--line);
-    border-radius:8px;padding:6px 10px;font-size:12px;color:var(--text-dim);}
+    border-radius:8px;padding:6px 10px;font-size:12px;color:var(--text-dim);display:flex;align-items:center;gap:8px;}
+  #zoomIndicator #btnFit{background:var(--panel-2);border:1px solid var(--line);color:var(--text);border-radius:6px;
+    padding:3px 9px;font-size:11px;cursor:pointer;}
+  #zoomIndicator #btnFit:hover{background:#383c45;}
+  #zoomPct{min-width:34px;text-align:right;}
+  #exportMenuWrap{display:inline-block;}
+  .export-menu{position:absolute;top:calc(100% + 6px);right:0;background:var(--panel);border:1px solid var(--line);
+    border-radius:8px;padding:6px;display:none;flex-direction:column;gap:4px;min-width:190px;box-shadow:0 4px 18px rgba(0,0,0,.35);z-index:25;}
+  .export-menu.show{display:flex;}
+  .export-menu button{background:transparent;border:1px solid transparent;color:var(--text);border-radius:6px;
+    padding:8px 10px;font-size:13px;text-align:left;cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:10px;}
+  .export-menu button:hover{background:var(--panel-2);}
+  .export-menu .shortcut{font-size:11px;color:var(--text-dim);}
 
   #hint{position:fixed;bottom:12px;right:12px;z-index:20;background:var(--panel);border:1px solid var(--line);
     border-radius:8px;padding:6px 10px;font-size:11px;color:var(--text-dim);max-width:340px;line-height:1.5;}
@@ -169,15 +181,20 @@
 <div id="subbar"></div>
 
 <div id="rightbar">
-  <button id="btnSaveProject" title="Save editable project as .json">Save Project</button>
-  <button id="btnLoadProject" title="Load a .json project">Load</button>
-  <button id="btnExportPNG">Export PNG</button>
-  <button id="btnFit" title="Fit view to content">Fit</button>
-  <button class="primary" id="btnExportPreview">Export Preview HTML</button>
+  <button id="btnNewCanvas" title="Start a new, blank canvas (Ctrl/Cmd+N)">New</button>
+  <button id="btnSaveProject" title="Save editable project as .json (Ctrl/Cmd+S)">Save</button>
+  <button id="btnLoadProject" title="Load a .json project (Ctrl/Cmd+O)">Load</button>
+  <div id="exportMenuWrap" style="position:relative;">
+    <button class="primary" id="btnExportMenu" title="Export the board" aria-haspopup="true" aria-expanded="false">Export &#9662;</button>
+    <div id="exportMenu" class="export-menu">
+      <button id="btnExportPreview">HTML Preview<span class="shortcut">Ctrl+E</span></button>
+      <button id="btnExportPNG">PNG Image<span class="shortcut">Ctrl+Shift+E</span></button>
+    </div>
+  </div>
 </div>
 
-<div id="zoomIndicator">100%</div>
-<div id="hint">Middle-click drag or Space+drag to pan &middot; Scroll to zoom &middot; Double-click text to edit it &middot; Ctrl/Cmd+Z undo &middot; Ctrl/Cmd+V paste</div>
+<div id="zoomIndicator"><button id="btnFit" title="Fit view to content">Fit</button><span id="zoomPct">100%</span></div>
+<div id="hint">Middle-click drag or Space+drag to pan &middot; Scroll to zoom &middot; Double-click text to edit it &middot; Ctrl/Cmd+Z undo &middot; Ctrl/Cmd+V paste &middot; Ctrl/Cmd+S save &middot; Ctrl/Cmd+O load &middot; Ctrl/Cmd+N new &middot; Ctrl/Cmd+E export HTML &middot; Ctrl/Cmd+Shift+E export PNG</div>
 
 <div id="viewport">
   <div id="world">
@@ -253,7 +270,7 @@ const elLayer = document.getElementById('elements');
 
 function applyTransform(){
   world.style.transform = `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`;
-  document.getElementById('zoomIndicator').textContent = Math.round(zoom*100)+'%';
+  document.getElementById('zoomPct').textContent = Math.round(zoom*100)+'%';
   // keep handles visually constant size by inverse-scaling them
   document.querySelectorAll('.handle, .line-handle, .g-handle, .g-rot').forEach(h=>{ h.style.transform = `scale(${1/zoom})`; h.style.transformOrigin='center center'; });
   updateToolCursorIndicator();
@@ -611,6 +628,16 @@ window.addEventListener('keydown', e=>{
     deleteSelected();
   }
   const meta = e.ctrlKey || e.metaKey;
+  // file/project shortcuts — intercepted even while typing in a text object, matching how
+  // most apps treat Ctrl+S (browsers would otherwise open their own "Save Page" dialog,
+  // "Open File" dialog, or a new browser tab/window for S/O/N respectively)
+  if(meta && !e.altKey){
+    const k = e.key.toLowerCase();
+    if(k==='s'){ e.preventDefault(); saveProject(); return; }
+    if(k==='o'){ e.preventDefault(); document.getElementById('projectInput').click(); return; }
+    if(k==='n'){ e.preventDefault(); newCanvas(); return; }
+    if(k==='e'){ e.preventDefault(); closeExportMenu(); openExportModal(e.shiftKey ? 'png' : 'html'); return; }
+  }
   // select all (Ctrl/Cmd + A)
   if(meta && e.key.toLowerCase()==='a' && !isTypingTarget(e)){
     e.preventDefault();
@@ -2077,11 +2104,12 @@ function resetHistory(){
 }
 
 // ================= SAVE / LOAD PROJECT =================
-document.getElementById('btnSaveProject').addEventListener('click', ()=>{
+function saveProject(){
   const data = { elements, vectors, zOrder, pan, zoom, idCounter };
   const blob = new Blob([JSON.stringify(data)], {type:'application/json'});
   downloadBlob(blob, 'board-project.json');
-});
+}
+document.getElementById('btnSaveProject').addEventListener('click', saveProject);
 document.getElementById('btnLoadProject').addEventListener('click', ()=> document.getElementById('projectInput').click());
 document.getElementById('projectInput').addEventListener('change', (e)=>{
   const file = e.target.files[0];
@@ -2128,6 +2156,24 @@ function loadProject(data){
   resetHistory();
   if(skipped) alert(skipped+' item(s) in this project were corrupted and could not be loaded. The rest of the board loaded normally.');
 }
+
+// ================= NEW CANVAS =================
+function newCanvas(){
+  if((elements.length || vectors.length) && !confirm('Start a new canvas? Anything not saved will be lost.')) return;
+  deselect();
+  elLayer.innerHTML = '';
+  elements = [];
+  vectors = [];
+  zOrder = [];
+  imageStore = {};
+  idCounter = 1;
+  pan = {x:0, y:0};
+  zoom = 1;
+  applyTransform();
+  resetHistory();
+  scheduleAutosave();
+}
+document.getElementById('btnNewCanvas').addEventListener('click', newCanvas);
 
 function downloadBlob(blob, filename){
   const a = document.createElement('a');
@@ -2301,8 +2347,20 @@ function openExportModal(mode){
   document.getElementById('exportModalBg').classList.add('show');
 }
 
-document.getElementById('btnExportPreview').addEventListener('click', ()=> openExportModal('html'));
-document.getElementById('btnExportPNG').addEventListener('click', ()=> openExportModal('png'));
+// Export dropdown: a single "Export" button reveals both formats, replacing the two
+// separate always-visible buttons this used to be.
+const exportMenuBtn = document.getElementById('btnExportMenu');
+const exportMenu = document.getElementById('exportMenu');
+function closeExportMenu(){ exportMenu.classList.remove('show'); exportMenuBtn.setAttribute('aria-expanded','false'); }
+function toggleExportMenu(){
+  const willShow = !exportMenu.classList.contains('show');
+  exportMenu.classList.toggle('show', willShow);
+  exportMenuBtn.setAttribute('aria-expanded', willShow ? 'true' : 'false');
+}
+exportMenuBtn.addEventListener('click', (e)=>{ e.stopPropagation(); toggleExportMenu(); });
+document.addEventListener('click', (e)=>{ if(!e.target.closest('#exportMenuWrap')) closeExportMenu(); });
+document.getElementById('btnExportPreview').addEventListener('click', ()=>{ closeExportMenu(); openExportModal('html'); });
+document.getElementById('btnExportPNG').addEventListener('click', ()=>{ closeExportMenu(); openExportModal('png'); });
 
 document.getElementById('exportCancel').addEventListener('click', ()=>{
   document.getElementById('exportModalBg').classList.remove('show');
@@ -2591,7 +2649,11 @@ async function buildPreviewHTML(){
   .txt{padding:2px 4px;line-height:1.25;}
   .vec svg{position:absolute;left:0;top:0;overflow:visible;}
   #zi{position:fixed;bottom:10px;left:10px;background:rgba(37,40,46,.85);color:#e7e9ec;font:12px sans-serif;
-    padding:5px 9px;border-radius:6px;z-index:5;}
+    padding:6px 10px;border-radius:6px;z-index:5;display:flex;align-items:center;gap:8px;}
+  #zi button{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);color:#e7e9ec;border-radius:6px;
+    padding:3px 9px;font:11px sans-serif;cursor:pointer;}
+  #zi button:hover{background:rgba(255,255,255,.16);}
+  #zi span{min-width:34px;text-align:right;}
 </style></head>
 <body>
 <div id="vp">
@@ -2599,11 +2661,10 @@ async function buildPreviewHTML(){
     <div id="el"></div>
   </div>
 </div>
-<button id="btnFitPrev" style="position:fixed;top:10px;right:10px;z-index:6;padding:6px 10px;border-radius:6px;background:rgba(37,40,46,.85);color:#e7e9ec;border:none;">Fit</button>
-<div id="zi">100%</div>
+<div id="zi"><button id="btnFitPrev">Fit</button><span id="ziPct">100%</span></div>
 <script>
 const DATA = ${json};
-const vp=document.getElementById('vp'), wd=document.getElementById('wd'), el=document.getElementById('el'), zi=document.getElementById('zi');
+const vp=document.getElementById('vp'), wd=document.getElementById('wd'), el=document.getElementById('el'), zi=document.getElementById('ziPct');
 const SVGNS='http://www.w3.org/2000/svg';
 let pan={x:0,y:0}, zoom=1;
 function hexToRgba(hex, opacity){
