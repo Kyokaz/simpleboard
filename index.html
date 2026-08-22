@@ -134,8 +134,14 @@
   .export-menu button:hover{background:var(--panel-2);}
   .export-menu .shortcut{font-size:11px;color:var(--text-dim);}
 
-  #hint{position:fixed;bottom:12px;right:12px;z-index:20;background:var(--panel);border:1px solid var(--line);
-    border-radius:8px;padding:6px 10px;font-size:11px;color:var(--text-dim);max-width:340px;line-height:1.5;}
+  #hint{position:fixed;bottom:44px;right:12px;z-index:20;background:var(--panel);border:1px solid var(--line);
+    border-radius:8px;padding:6px 10px;font-size:11px;color:var(--text-dim);max-width:340px;line-height:1.5;display:none;}
+  #hint.show{display:block;}
+  #btnHelp{position:fixed;bottom:12px;right:12px;z-index:20;background:var(--panel);border:1px solid var(--line);
+    color:var(--text);border-radius:50%;width:26px;height:26px;padding:0;display:flex;align-items:center;
+    justify-content:center;font-size:13px;font-weight:700;cursor:pointer;}
+  #btnHelp:hover{background:var(--panel-2);}
+  #btnHelp.active{background:var(--accent);color:#1b1d22;border-color:var(--accent);}
 
   #fileInput,#projectInput{display:none;}
 
@@ -195,6 +201,7 @@
 
 <div id="zoomIndicator"><button id="btnFit" title="Fit view to content">Fit</button><span id="zoomPct">100%</span></div>
 <div id="hint">Middle-click drag or Space+drag to pan &middot; Scroll to zoom &middot; Double-click text to edit it &middot; Ctrl/Cmd+Z undo &middot; Ctrl/Cmd+V paste &middot; Ctrl/Cmd+S save &middot; Ctrl/Cmd+O load &middot; Ctrl/Cmd+N new &middot; Ctrl/Cmd+E export HTML &middot; Ctrl/Cmd+Shift+E export PNG</div>
+<button id="btnHelp" title="Toggle controls help">?</button>
 
 <div id="viewport">
   <div id="world">
@@ -2441,6 +2448,19 @@ function compressImageSrc(src, maxDim, quality){
 
 document.getElementById('btnFit').addEventListener('click', fitToContent);
 
+// controls-help popup — a "?" toggle instead of always-on text, so the hint bar doesn't
+// permanently take up space, but it starts open (default on) so it's seen at least once.
+(function(){
+  const btn = document.getElementById('btnHelp');
+  const hint = document.getElementById('hint');
+  hint.classList.add('show');
+  btn.classList.add('active');
+  btn.addEventListener('click', ()=>{
+    const showing = hint.classList.toggle('show');
+    btn.classList.toggle('active', showing);
+  });
+})();
+
 function fitToContent(){
   const b = computeBounds();
   const w = b.maxX-b.minX || 800, h=b.maxY-b.minY || 600;
@@ -2654,6 +2674,11 @@ async function buildPreviewHTML(){
     padding:3px 9px;font:11px sans-serif;cursor:pointer;}
   #zi button:hover{background:rgba(255,255,255,.16);}
   #zi span{min-width:34px;text-align:right;}
+  #btnHelpPrev{border-radius:50%!important;width:22px;height:22px;padding:0!important;display:flex;align-items:center;justify-content:center;font-weight:700;}
+  #btnHelpPrev.active{background:rgba(255,255,255,.22)!important;}
+  #helpPopup{position:fixed;bottom:46px;left:10px;background:rgba(37,40,46,.92);color:#e7e9ec;font:11px sans-serif;
+    padding:8px 11px;border-radius:8px;z-index:5;max-width:230px;line-height:1.6;box-shadow:0 4px 18px rgba(0,0,0,.35);display:none;}
+  #helpPopup.show{display:block;}
 </style></head>
 <body>
 <div id="vp">
@@ -2661,7 +2686,8 @@ async function buildPreviewHTML(){
     <div id="el"></div>
   </div>
 </div>
-<div id="zi"><button id="btnFitPrev">Fit</button><span id="ziPct">100%</span></div>
+<div id="helpPopup">Ctrl/Cmd+scroll to zoom &middot; two fingers to pan</div>
+<div id="zi"><button id="btnFitPrev">Fit</button><span id="ziPct">100%</span><button id="btnHelpPrev" title="Toggle controls help">?</button></div>
 <script>
 const DATA = ${json};
 const vp=document.getElementById('vp'), wd=document.getElementById('wd'), el=document.getElementById('el'), zi=document.getElementById('ziPct');
@@ -2891,14 +2917,24 @@ vp.addEventListener('touchend', function(e){
   tapStartPos=null; tapMoved=false;
 });
 
-// small fading hint about the modifier-key/two-finger requirement, shown only when embedded
-if(IN_IFRAME){
-  const hint=document.createElement('div');
-  hint.textContent='Ctrl/Cmd+scroll to zoom \u00B7 two fingers to pan';
-  hint.style.cssText='position:fixed;bottom:10px;right:10px;background:rgba(37,40,46,.85);color:#e7e9ec;font:11px sans-serif;padding:5px 9px;border-radius:6px;z-index:5;pointer-events:none;transition:opacity .6s;';
-  document.body.appendChild(hint);
-  setTimeout(function(){ hint.style.opacity='0'; setTimeout(function(){ hint.remove(); }, 700); }, 3500);
-}
+// controls-help popup. Previously this was a hint that faded out on its own after a few
+// seconds, which meant a user could easily miss it entirely if they weren't looking right
+// when it appeared; now it's a persistent "?" toggle, left open by default so the info is
+// seen at least once, but dismissible so it doesn't linger forever. The button itself is
+// always shown (not just when embedded) — hiding it outside an iframe meant it never
+// appeared at all for the common case of just opening the exported file directly — but the
+// popup's text adapts, since the modifier-key/two-finger requirement is iframe-only.
+const helpBtn = document.getElementById('btnHelpPrev');
+const helpPopup = document.getElementById('helpPopup');
+helpPopup.textContent = IN_IFRAME
+  ? 'Ctrl/Cmd+scroll to zoom \u00B7 two fingers to pan'
+  : 'Scroll to zoom \u00B7 drag to pan \u00B7 pinch to zoom on touch';
+helpPopup.classList.add('show');
+helpBtn.classList.add('active');
+helpBtn.addEventListener('click', ()=>{
+  const showing = helpPopup.classList.toggle('show');
+  helpBtn.classList.toggle('active', showing);
+});
 
 
 // shared by initial load, the Fit button, and the resize/orientation-change handler below
